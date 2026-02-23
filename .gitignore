@@ -1,0 +1,29 @@
+# Entorno virtual de uv
+.venv/
+uv.lock
+
+# Python (byte-code, caché)
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Datos (¡MUY IMPORTANTE!)
+# No subas datos crudos o pesados al repo
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.jsonl
+
+# Modelos y resultados pesados
+models/
+*.pkl
+*.pt
+*.h5
+
+# Variables de entorno (credenciales, llaves de API)
+.env
+
+# Sistema
+.DS_Store

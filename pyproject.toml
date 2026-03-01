@@ -1,0 +1,21 @@
+[project]
+name = "smartco-deliverystatus-prediction"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "catboost>=1.2.10",
+    "ipykernel>=7.2.0",
+    "lightgbm>=4.6.0",
+    "matplotlib>=3.10.8",
+    "mlflow>=1.27.0",
+    "numpy>=2.4.2",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.1",
+    "pyarrow>=23.0.1",
+    "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "wandb>=0.25.0",
+    "xgboost>=3.2.0",
+]

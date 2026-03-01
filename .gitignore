@@ -8,14 +8,6 @@ __pycache__/
 *$py.class
 .ipynb_checkpoints/
 
-# Datos (¡MUY IMPORTANTE!)
-# No subas datos crudos o pesados al repo
-data/raw/
-data/processed/
-*.csv
-*.parquet
-*.jsonl
-
 # Modelos y resultados pesados
 models/
 *.pkl

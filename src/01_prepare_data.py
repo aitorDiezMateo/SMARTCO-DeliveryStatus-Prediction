@@ -60,9 +60,14 @@ TEXT_AND_NOISE_COLS = [
 ]
 
 REDUNDANT_COLS = [
-    "Category Id",       # We keep Category Name
-    "Department Id",     # We keep Department Name
-    "Product Category Id"
+    "Category Id",             # We keep Category Name
+    "Department Id",           # We keep Department Name
+    "Product Category Id",
+    "Order Profit Per Order",  # same as Benefit per order
+    "Order Item Product Price",  # same as Product Price
+    "Order Item Total",        # same as Sales per customer
+    "Customer Zipcode",        # we already keep city and state
+    "Product Status",          # constant, non-informative
 ]
 
 # Unimos todas las listas para el drop final

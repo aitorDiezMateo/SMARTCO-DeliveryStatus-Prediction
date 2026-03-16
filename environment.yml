@@ -125,6 +125,7 @@ dependencies:
       - networkx==3.6.1
       - numba==0.62.1
       - numpy==2.3.5
+      - optuna==4.5.0
       - pandas==2.3.3
       - patsy==1.0.2
       - phik==0.12.5

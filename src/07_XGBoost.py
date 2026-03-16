@@ -1,13 +1,9 @@
 """
-Optuna hyperparameter tuning for GPU XGBoost with CV-safe feature engineering.
+This script runs Optuna hyperparameter tuning for GPU XGBoost with CV-safe
+feature engineering.
 
-Requirements (install in your conda env):
-  - optuna
-  - xgboost
-  - scikit-learn
-
-This script loads `data/processed/train_raw.csv`, builds an sklearn Pipeline
-with fold-safe encoders, and tunes XGBoost hyperparameters using Stratified CV.
+It loads `data/processed/train_raw.csv`, builds an sklearn Pipeline with
+fold-safe encoders, and tunes XGBoost hyperparameters using Stratified CV.
 """
 
 from __future__ import annotations
@@ -17,13 +13,19 @@ from pathlib import Path
 
 import numpy as np
 import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.metrics import f1_score
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_sample_weight
 
 import xgboost as xgb
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.preprocessing import StandardScaler
+from imblearn.combine import SMOTEENN, SMOTETomek
+from imblearn.over_sampling import ADASYN, RandomOverSampler, SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import importlib.util
 
 
@@ -43,31 +45,84 @@ def _load_fe_module():
     return module
 
 
+######### Paths and constants #########
+
 DATA_PATH = Path(__file__).parent.parent / "data"
 TRAIN_RAW_PATH = os.path.join(DATA_PATH, "processed", "train_raw.csv")
+OUTPUT_PATH = Path(__file__).parent.parent / "output" / "optuna"
 
 TARGET_COL = "Delivery Status"
+STUDY_NAME = "xgboost"
+N_TRIALS = 200
+DB_PATH = OUTPUT_PATH / "xgboost_study.db"
 
 
-def main() -> None:
-    df = pd.read_csv(TRAIN_RAW_PATH)
-    if TARGET_COL not in df.columns:
-        raise ValueError(f"Target column '{TARGET_COL}' not found in {TRAIN_RAW_PATH}")
+######### Load training data #########
 
-    y_raw = df[TARGET_COL].astype(str)
-    X = df.drop(columns=[TARGET_COL])
+OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+storage_url = f"sqlite:///{DB_PATH}"
 
-    # XGBoost needs numeric class labels for multiclass
-    le = LabelEncoder()
-    y = le.fit_transform(y_raw)
-    n_classes = int(np.unique(y).size)
+print(f"Optuna storage: {storage_url}")
+print(f"Study name:     {STUDY_NAME}")
+print(f"N trials:       {N_TRIALS}")
+print()
 
-    fe_mod = _load_fe_module()
-    cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL)
+df = pd.read_csv(TRAIN_RAW_PATH)
+if TARGET_COL not in df.columns:
+    raise ValueError(f"Target column '{TARGET_COL}' not found in {TRAIN_RAW_PATH}")
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+y_raw = df[TARGET_COL].astype(str)
+X = df.drop(columns=[TARGET_COL])
 
-    def objective(trial: optuna.Trial) -> float:
+######### Encode target #########
+
+le = LabelEncoder()
+y = le.fit_transform(y_raw)
+n_classes = int(np.unique(y).size)
+
+######### Load feature engineering pipeline module #########
+
+fe_mod = _load_fe_module()
+cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL)
+
+######### Cross-validation configuration #########
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+
+######### Optuna objective #########
+
+def objective(trial: optuna.Trial) -> float:
+        scaler_choice = trial.suggest_categorical(
+            "scaler",
+            [
+                "none",
+                "standard",
+                "minmax",
+            ],
+        )
+
+        sampler_choice = trial.suggest_categorical(
+            "sampler",
+            [
+                "none",
+                "random_over",
+                "random_under",
+                "adasyn",
+                "smote",
+                "smote_tomek",
+                "smote_enn",
+            ],
+        )
+
+        class_weight_choice = trial.suggest_categorical(
+            "class_weight",
+            [
+                "none",
+                "balanced",
+            ],
+        )
+
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 300, 2000),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -95,11 +150,32 @@ def main() -> None:
             n_jobs=1,  # CV parallelism should be controlled externally if needed
             **params,
         )
-        
-        #TODO: Probar varios scalers
-        scaler = StandardScaler()
-        #TODO: Cambiar oversampler
-        sampler = RandomOverSampler(random_state=42)
+
+        if scaler_choice == "none":
+            scaler = None
+        elif scaler_choice == "standard":
+            scaler = StandardScaler()
+        elif scaler_choice == "minmax":
+            scaler = MinMaxScaler()
+        else:
+            raise ValueError(f"Unknown scaler choice: {scaler_choice}")
+
+        if sampler_choice == "none":
+            sampler = None
+        elif sampler_choice == "random_over":
+            sampler = RandomOverSampler(random_state=42)
+        elif sampler_choice == "random_under":
+            sampler = RandomUnderSampler(random_state=42)
+        elif sampler_choice == "adasyn":
+            sampler = ADASYN(random_state=42)
+        elif sampler_choice == "smote":
+            sampler = SMOTE(random_state=42)
+        elif sampler_choice == "smote_tomek":
+            sampler = SMOTETomek(random_state=42)
+        elif sampler_choice == "smote_enn":
+            sampler = SMOTEENN(random_state=42)
+        else:
+            raise ValueError(f"Unknown sampler choice: {sampler_choice}")
 
         pipe = fe_mod.build_pipeline(
             df_example=X,
@@ -109,19 +185,72 @@ def main() -> None:
             config=cfg,
         )
 
-        # Optimize for macro F1 by using sklearn's built-in scoring
-        scores = cross_val_score(pipe, X, y, cv=cv, scoring="f1_macro", n_jobs=1)
-        return float(scores.mean())
+        # Manual CV so we can pass fold-specific `sample_weight` when requested.
+        fold_scores: list[float] = []
 
-    study = optuna.create_study(direction="maximize", study_name="XGBoost")
-    study.optimize(objective, n_trials=40, show_progress_bar=True)
+        for fold_idx, (train_idx, valid_idx) in enumerate(cv.split(X, y), start=1):
+            X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
+            y_train, y_valid = y[train_idx], y[valid_idx]
 
-    print("Best CV f1_macro:", study.best_value)
-    print("Best params:")
-    for k, v in sorted(study.best_params.items()):
-        print(f"  {k}: {v}")
+            fit_kwargs = {}
+            # Only use class weights when we are NOT applying any sampler.
+            # Otherwise, the oversampler changes the effective sample sizes and
+            # the precomputed weights based on y_train no longer match.
+            use_class_weight = class_weight_choice == "balanced" and sampler_choice == "none"
+            if use_class_weight:
+                fit_kwargs["model__sample_weight"] = compute_sample_weight(
+                    class_weight="balanced",
+                    y=y_train,
+                )
+
+            pipe.fit(X_train, y_train, **fit_kwargs)
+            y_pred = pipe.predict(X_valid)
+
+            score = float(f1_score(y_valid, y_pred, average="macro"))
+            fold_scores.append(score)
+
+            trial.report(float(np.mean(fold_scores)), step=fold_idx)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+
+        mean_score = float(np.mean(fold_scores))
+        std_score = float(np.std(fold_scores))
+        trial.set_user_attr("cv_fold_scores", fold_scores)
+        trial.set_user_attr("cv_mean_f1_macro", mean_score)
+        trial.set_user_attr("cv_std_f1_macro", std_score)
+
+        return mean_score
 
 
-if __name__ == "__main__":
-    main()
+######### Create and run Optuna study #########
+
+sampler = TPESampler(seed=42)
+pruner = MedianPruner(n_startup_trials=10, n_warmup_steps=0, interval_steps=1)
+
+study = optuna.create_study(
+    direction="maximize",
+    study_name=STUDY_NAME,
+    storage=storage_url,
+    load_if_exists=True,   # resume if job is requeued or restarted
+    sampler=sampler,
+    pruner=pruner,
+)
+
+study.optimize(
+    objective,
+    n_trials=N_TRIALS,
+    show_progress_bar=True,
+    callbacks=[
+        optuna.study.MaxTrialsCallback(N_TRIALS, states=(optuna.trial.TrialState.COMPLETE,)),
+    ],
+)
+
+print("Best CV f1_macro:", study.best_value)
+print("Best params:")
+for k, v in sorted(study.best_params.items()):
+    print(f"  {k}: {v}")
+
+pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
+complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+print(f"\nTrials: {complete} complete, {pruned} pruned")
 

@@ -148,7 +148,8 @@ class TargetMeanEncoderMulticlass(BaseEstimator, TransformerMixin):
             mapping = self.maps_[c]
             key = _safe_series(X[c]).astype("object")
 
-            enc = mapping.reindex(key).to_numpy()
+            # Ensure a writable array: pandas may return a read-only view depending on backend.
+            enc = np.array(mapping.reindex(key).to_numpy(), copy=True)
             nan_rows = np.isnan(enc).all(axis=1)
             if nan_rows.any():
                 enc[nan_rows] = self.global_priors_

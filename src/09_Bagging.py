@@ -15,7 +15,7 @@ from pathlib import Path
 
 import optuna
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.ensemble import BaggingClassifier
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, f1_score
 from sklearn.tree import DecisionTreeClassifier
@@ -23,12 +23,14 @@ from sklearn.tree import DecisionTreeClassifier
 DATA_PATH = Path(__file__).parent.parent / "data"
 TRAIN_RAW_PATH = os.path.join(DATA_PATH, "processed", "train_raw.csv")
 TEST_RAW_PATH = os.path.join(DATA_PATH, "processed", "test_raw.csv")
+DATE_COL = "order date (DateOrders)"
 
 TARGET_COL = "Delivery Status"
 RANDOM_STATE = 42
 CV_SPLITS = 5
 N_TRIALS = int(os.environ.get("OPTUNA_N_TRIALS", "30"))
 OPTUNA_SCORING = "f1_macro"
+BEST_PARAMS_CSV = DATA_PATH / "processed" / "bagging_best_params.csv"
 
 
 def _load_fe_module():
@@ -83,7 +85,7 @@ def _build_bagging_classifier(params: dict[str, object], *, oob_score: bool) -> 
 	)
 
 
-def _build_objective(X: pd.DataFrame, y: pd.Series, fe_mod, cfg, cv: StratifiedKFold):
+def _build_objective(X: pd.DataFrame, y: pd.Series, fe_mod, cfg, cv: TimeSeriesSplit):
 	"""Create the Optuna objective with the project feature-engineering pipeline."""
 
 	def objective(trial: optuna.Trial) -> float:
@@ -124,6 +126,10 @@ def _build_objective(X: pd.DataFrame, y: pd.Series, fe_mod, cfg, cv: StratifiedK
 
 	return objective
 
+def _save_best_params_csv(study: optuna.Study, out_path: Path) -> None:
+	rows = [{"param": k, "value": v} for k, v in sorted(study.best_params.items())]
+	out_path.parent.mkdir(parents=True, exist_ok=True)
+	pd.DataFrame(rows).to_csv(out_path, index=False)
 
 def main() -> None:
 	train_df = pd.read_csv(TRAIN_RAW_PATH)
@@ -136,13 +142,19 @@ def main() -> None:
 
 	X_train = train_df.drop(columns=[TARGET_COL])
 	y_train = train_df[TARGET_COL]
+
+	if DATE_COL not in X_train.columns:
+		raise ValueError(f"Date column '{DATE_COL}' not found in training data.")
+	order = pd.to_datetime(X_train[DATE_COL], errors="coerce").sort_values().index
+	X_train = X_train.loc[order].reset_index(drop=True)
+	y_train = y_train.loc[order].reset_index(drop=True)
+
 	X_test = test_df.drop(columns=[TARGET_COL])
 	y_test = test_df[TARGET_COL]
 
 	fe_mod = _load_fe_module()
 	cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL)
-	cv = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-
+	cv = TimeSeriesSplit(n_splits=CV_SPLITS)
 	study = optuna.create_study(
 		direction="maximize",
 		study_name="BaggingClassifier",
@@ -151,6 +163,7 @@ def main() -> None:
 	)
 	objective = _build_objective(X_train, y_train, fe_mod, cfg, cv)
 	study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
+	_save_best_params_csv(study, BEST_PARAMS_CSV)
 
 	bagging_model = _build_bagging_classifier(study.best_params, oob_score=True)
 

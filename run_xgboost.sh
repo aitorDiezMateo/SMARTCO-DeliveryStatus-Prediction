@@ -12,6 +12,7 @@
 #SBATCH --mail-user=aitor.diez@opendeusto.es
 
 # ---------------------------------------------------------------------------
+# Command to clean the .sh files: find . -name "*.sh" -exec sed -i 's/\r//' {} +
 # Optuna DB path — stored in the project directory so persists between jobs.
 # You can override from the command line:
 #   sbatch run_xgboost.sh --db /path/to/study.db --n-trials 200

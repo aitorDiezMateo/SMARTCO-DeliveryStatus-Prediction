@@ -3,7 +3,7 @@
 #SBATCH --job-name=xgboost_optuna
 #SBATCH --output=logs/xgboost_%j.out
 #SBATCH --error=logs/xgboost_%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=23:50:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -18,7 +18,7 @@
 #   sbatch run_xgboost.sh --db /path/to/study.db --n-trials 200
 # ---------------------------------------------------------------------------
 DB_PATH=/scratch/aitordiez/SMARTCO-DeliveryStatus-Prediction/output/optuna/xgboost_study.db
-N_TRIALS=100
+N_TRIALS=400
 
 # Pass any extra CLI args forwarded via sbatch (e.g. --n-trials 50)
 EXTRA_ARGS="$@"

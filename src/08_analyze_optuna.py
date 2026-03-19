@@ -231,7 +231,6 @@ def evaluate_best_trial(
     sampler = _make_sampler(sampler_choice)
 
     pipe = fe_mod.build_pipeline(
-        df_example=X_train,
         model=model,
         scaler=scaler,
         oversampler=sampler,

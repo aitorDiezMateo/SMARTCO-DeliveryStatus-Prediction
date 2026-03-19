@@ -8,7 +8,7 @@ General, CV-safe feature engineering + preprocessing pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,10 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
+
+from imblearn.combine import SMOTEENN, SMOTETomek
+from imblearn.over_sampling import ADASYN, RandomOverSampler, SMOTENC
+from imblearn.under_sampling import RandomUnderSampler
 
 DATE_COL_DEFAULT = "order date (DateOrders)"
 TARGET_COL_DEFAULT = "Delivery Status"
@@ -371,6 +375,160 @@ class TargetMeanEncoderMulticlass(BaseEstimator, TransformerMixin):
         return np.array(names, dtype=object)
 
 
+class CategoricalResampler:
+    """
+    Categorical-aware resampling for mixed-type dataframes.
+
+    SMOTENC and hybrid SMOTE variants require integer-encoded categoricals and a fully-numeric
+    feature matrix. This wrapper:
+      1) encodes categorical columns to integer codes (per-fit call)
+      2) converts datetimes to int64 nanoseconds
+      3) applies the selected imblearn sampler
+      4) decodes categoricals back to strings and datetimes back to datetime
+    """
+
+    def __init__(
+        self,
+        choice: str,
+        *,
+        categorical_cols: Optional[Sequence[str]] = None,
+        random_state: int = 42,
+    ) -> None:
+        self.choice = choice
+        self.categorical_cols = list(categorical_cols) if categorical_cols is not None else None
+        self.random_state = int(random_state)
+
+    def _is_datetime_col(self, x: pd.Series) -> bool:
+        return pd.api.types.is_datetime64_any_dtype(x) or pd.api.types.is_datetime64tz_dtype(x)
+
+    def _infer_categorical_cols(self, X: pd.DataFrame) -> list[str]:
+        # Prefer explicit categorical columns, but also include all dtype-based categoricals
+        # so the numeric encoding step never hits raw strings.
+        cat_set = set(self.categorical_cols or [])
+        for c in X.columns:
+            if (
+                pd.api.types.is_object_dtype(X[c])
+                or pd.api.types.is_string_dtype(X[c])
+                or pd.api.types.is_categorical_dtype(X[c])
+                or pd.api.types.is_bool_dtype(X[c])
+            ):
+                cat_set.add(c)
+        return [c for c in X.columns if c in cat_set]
+
+    def fit_resample(self, X: pd.DataFrame, y: Sequence) -> tuple[pd.DataFrame, np.ndarray]:
+        if self.choice == "none":
+            return X, np.asarray(y)
+
+        X_df = X.copy()
+        cols = X_df.columns.tolist()
+
+        categorical_cols = self._infer_categorical_cols(X_df)
+        datetime_cols = [c for c in cols if c not in categorical_cols and self._is_datetime_col(X_df[c])]
+
+        # Map categorical columns -> integer codes, keep categories for decoding.
+        cat_categories: Dict[str, list[str]] = {}
+        cat_indices: list[int] = []
+        X_enc = np.empty((len(X_df), len(cols)), dtype=float)
+
+        for j, c in enumerate(cols):
+            if c in categorical_cols:
+                s = X_df[c].astype(str).fillna("<NA>")
+                cat = pd.Categorical(s)
+                codes = cat.codes.astype(int)  # -1 means "<NA>" after fillna is unlikely, kept for safety
+
+                # Make "<NA>" an explicit last category for stable decoding.
+                na_mask = codes == -1
+                if na_mask.any():
+                    codes = codes.copy()
+                    codes[na_mask] = len(cat.categories)
+                    cat_categories[c] = [str(v) for v in cat.categories.tolist()] + ["<NA>"]
+                else:
+                    cat_categories[c] = [str(v) for v in cat.categories.tolist()]
+
+                cat_indices.append(j)
+                X_enc[:, j] = codes.astype(float)
+            elif c in datetime_cols:
+                dt = pd.to_datetime(X_df[c], errors="coerce")
+                # Convert datetime -> int64 nanoseconds; represent NaT as -1.
+                ns = dt.values.astype(np.int64)
+                na_mask = dt.isna().to_numpy()
+                if na_mask.any():
+                    ns = ns.copy()
+                    ns[na_mask] = -1
+                X_enc[:, j] = ns.astype(float)
+            else:
+                x_num = pd.to_numeric(X_df[c], errors="coerce").astype(float)
+                X_enc[:, j] = x_num.fillna(0.0).to_numpy()
+
+        if cat_indices:
+            X_enc[:, cat_indices] = np.round(X_enc[:, cat_indices]).astype(int)
+
+        sampler = self._make_sampler(cat_indices)
+        X_res_enc, y_res = sampler.fit_resample(X_enc, np.asarray(y))
+        X_res_arr = np.asarray(X_res_enc)
+
+        # Decode back to a dataframe compatible with the rest of the pipeline.
+        X_res = pd.DataFrame(columns=cols, data=X_res_arr)
+        for j, c in enumerate(cols):
+            if c in categorical_cols:
+                codes = np.round(X_res_arr[:, j]).astype(int)
+                cats = cat_categories.get(c, [])
+                out = np.full(len(codes), "<NA>", dtype=object)
+                valid = (codes >= 0) & (codes < len(cats))
+                if valid.any():
+                    out[valid] = np.array(cats, dtype=object)[codes[valid]]
+                X_res[c] = out
+            elif c in datetime_cols:
+                ns = np.round(X_res_arr[:, j]).astype(np.int64)
+                ns = np.where(ns < 0, -1, ns)
+                dt = pd.to_datetime(ns, unit="ns", errors="coerce")
+                # Ensure mutable container for masking.
+                dt_series = pd.Series(dt)
+                mask = ns < 0
+                if mask.any():
+                    dt_series[mask] = pd.NaT
+                X_res[c] = dt_series
+            else:
+                X_res[c] = pd.to_numeric(X_res[c], errors="coerce").astype(float)
+
+        return X_res, np.asarray(y_res)
+
+    def _make_sampler(self, cat_indices: list[int]):
+        # Build sampler at call-time so `cat_indices` is correct for the current fold.
+        if self.choice == "random_over":
+            return RandomOverSampler(random_state=self.random_state)
+        if self.choice == "random_under":
+            return RandomUnderSampler(random_state=self.random_state)
+        if self.choice == "adasyn":
+            return ADASYN(random_state=self.random_state)
+
+        if self.choice == "smotenc":
+            return SMOTENC(categorical_features=cat_indices, random_state=self.random_state)
+        if self.choice == "smotenc_tomek":
+            smote = SMOTENC(categorical_features=cat_indices, random_state=self.random_state)
+            return SMOTETomek(smote=smote, random_state=self.random_state)
+        if self.choice == "smotenc_enn":
+            smote = SMOTENC(categorical_features=cat_indices, random_state=self.random_state)
+            return SMOTEENN(smote=smote, random_state=self.random_state)
+
+        raise ValueError(f"Unknown sampler choice: {self.choice}")
+
+
+def make_resampler(
+    choice: str,
+    *,
+    categorical_cols: Optional[Sequence[str]] = None,
+    random_state: int = 42,
+) -> Optional[CategoricalResampler]:
+    if choice == "none":
+        return None
+    return CategoricalResampler(
+        choice,
+        categorical_cols=categorical_cols,
+        random_state=random_state,
+    )
+
+
 @dataclass(frozen=True)
 class FeatureEngineeringConfig:
     target_col: str = TARGET_COL_DEFAULT
@@ -430,8 +588,42 @@ def build_preprocessor(
     )
 
 
+class LazyPreprocessor(BaseEstimator, TransformerMixin):
+    """
+    Lazily builds and fits the ColumnTransformer on first `fit()`.
+
+    This avoids needing a `df_example` at pipeline construction time, which is useful
+    when upstream transformers (FeatureBuilder, HistoricalTargetStats) change the
+    schema and the final feature set is only known once real training data is seen.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: FeatureEngineeringConfig = FeatureEngineeringConfig(),
+        smoothing: float = 20.0,
+    ) -> None:
+        self.config = config
+        self.smoothing = float(smoothing)
+        self.pre_: ColumnTransformer | None = None
+
+    def fit(self, X: pd.DataFrame, y=None):  # noqa: ANN001
+        self.pre_ = build_preprocessor(X, config=self.config, smoothing=self.smoothing)
+        self.pre_.fit(X, y)
+        return self
+
+    def transform(self, X: pd.DataFrame):  # noqa: ANN001
+        if self.pre_ is None:
+            raise RuntimeError("LazyPreprocessor must be fitted before transform().")
+        return self.pre_.transform(X)
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:  # noqa: ANN001
+        if self.pre_ is None:
+            raise RuntimeError("LazyPreprocessor must be fitted before get_feature_names_out().")
+        return self.pre_.get_feature_names_out(input_features)
+
+
 def build_pipeline(
-    df_example: pd.DataFrame,
     model,
     *,
     scaler=None,
@@ -443,19 +635,18 @@ def build_pipeline(
     """
     Build a customizable pipeline:
 
-    FeatureBuilder -> ColumnTransformer -> (optional scaler) -> (optional oversampler) -> model
+    FeatureBuilder -> (optional sampler) -> HistoricalTargetStats -> ColumnTransformer
+    -> (optional scaler) -> model
 
     Parameters
     ----------
-    df_example : pd.DataFrame
-        Example features before FeatureBuilder (e.g. training dataframe without target).
     model : estimator
         Any sklearn-compatible estimator (XGBoost, LogisticRegression, RandomForest, etc.).
     scaler : transformer or None
         Any sklearn scaler (StandardScaler, RobustScaler, etc.), applied after the ColumnTransformer.
     oversampler : sampler or None
-        Any imblearn oversampler (RandomOverSampler, SMOTE, etc.), applied after scaling and
-        only during fit.
+        Any imblearn-style resampler implementing `fit_resample(X, y)`.
+        This runs before historical-stat feature generation and before encoders.
     smoothing : float
         Smoothing strength for the target mean encoder (higher = more regularisation).
     classes : Sequence or None
@@ -467,7 +658,6 @@ def build_pipeline(
         date_col=config.date_col,
         freq_encode_cols=list(config.freq_encode_cols),
     )
-    X_example_feat = feat.fit_transform(df_example.copy())
 
     hist = HistoricalTargetStats(
         date_col=config.date_col,
@@ -475,27 +665,18 @@ def build_pipeline(
         smoothing=smoothing,
         classes=classes,
     )
-    # Ensure historical feature columns exist when building the ColumnTransformer.
-    # We add placeholders here; real values are computed during fit/transform.
-    if hist.classes_ is None:
-        # Fallback: assume binary if classes weren't provided by the caller/model.
-        hist = HistoricalTargetStats(
-            date_col=config.date_col,
-            group_cols=("shipping_route", "Market"),
-            smoothing=smoothing,
-            classes=[0, 1],
-        )
-    X_example_feat_hist = hist.add_placeholder_columns(X_example_feat.copy())
 
-    pre = build_preprocessor(X_example_feat_hist, config=config, smoothing=smoothing)
+    pre = LazyPreprocessor(config=config, smoothing=smoothing)
 
-    steps = [("feat", feat), ("hist", hist), ("pre", pre)]
-
-    if scaler is not None:
-        steps.append(("scaler", scaler))
+    steps = [("feat", feat)]
 
     if oversampler is not None:
         steps.append(("sampler", oversampler))
+
+    steps.extend([("hist", hist), ("pre", pre)])
+
+    if scaler is not None:
+        steps.append(("scaler", scaler))
 
     steps.append(("model", model))
 

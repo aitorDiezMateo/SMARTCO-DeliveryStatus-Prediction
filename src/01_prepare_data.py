@@ -5,8 +5,7 @@ to ensure a clean separation for model evaluation.
 import pandas as pd
 import os
 from pathlib import Path
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 
 TEST_SIZE = 0.2
 DATA_PATH = Path(__file__).parent.parent / "data"
@@ -37,6 +36,59 @@ percent = 100 * n_duplicates / len(df)
 print(f"Duplicated rows: {n_duplicates} ({percent:.2f}%)")
 print()
 # There aren't any duplicated rows in the dataset.
+
+######### Feature Engineering: Temporal Target Encoding #########
+print("Generating rolling target encoding features...")
+# Asegurarse de que son datetime para calcular fechas
+df['order date (DateOrders)'] = pd.to_datetime(df['order date (DateOrders)'])
+df['shipping date (DateOrders)'] = pd.to_datetime(df['shipping date (DateOrders)'])
+
+# Fecha de llegada (real)
+df['Arrival Date Real'] = df['shipping date (DateOrders)'] + pd.to_timedelta(df['Days for shipping (real)'], unit='D')
+
+# Extraer el historial de llegadas y hacer dummies del target
+df_arrivals = df[['Arrival Date Real', 'Delivery Status']].dropna().sort_values('Arrival Date Real')
+dummies = pd.get_dummies(df_arrivals['Delivery Status'])
+df_arrivals = pd.concat([df_arrivals, dummies], axis=1)
+
+# Agrupar llegadas por dia
+daily_arrivals = df_arrivals.groupby(df_arrivals['Arrival Date Real'].dt.floor('D')).sum(numeric_only=True)
+
+# Reindexar para cubrir todo el lapso de tiempo hasta la fecha maxima
+full_date_range = pd.date_range(daily_arrivals.index.min(), df['order date (DateOrders)'].max().floor('D'))
+daily_arrivals = daily_arrivals.reindex(full_date_range).fillna(0)
+
+# Calcular porcentajes rolling sin data leakage
+windows = [7, 14, 30]
+rolling_features = {}
+
+for w in windows:
+    # shift(1) es super importante: asegura que los conteos sean estrictamente anteriores al dia actual (evita fuga de datos del mismo dia futuro)
+    roll_sum = daily_arrivals.rolling(window=w, min_periods=1).sum().shift(1)
+    total = roll_sum.sum(axis=1).replace(0, np.nan)
+    pct = roll_sum.div(total, axis=0).fillna(0)
+    
+    for col in pct.columns:
+        col_name = str(col).replace(" ", "_").lower()
+        rolling_features[f'target_enc_{col_name}_{w}d'] = pct[col]
+
+rolling_df = pd.DataFrame(rolling_features)
+
+rolling_df = rolling_df.fillna(0)  # In case there are any NaNs left (e.g., at the very beginning of the series)
+
+# Unir con el dataset principal truncando las fechas a nivel de dia
+df['order_date_floor'] = df['order date (DateOrders)'].dt.floor('D')
+df = df.merge(rolling_df, left_on='order_date_floor', right_index=True, how='left')
+
+# Rellenar NaNs solo en las columnas de target encoding tras el merge
+target_enc_cols = [col for col in df.columns if col.startswith('target_enc_')]
+df[target_enc_cols] = df[target_enc_cols].fillna(0)
+
+# Drop columnas temporales
+df = df.drop(columns=['Arrival Date Real', 'order_date_floor'])
+print("Rolling target encoding features generated successfully.")
+print("Current shape with new features:", df.shape)
+print()
 
 ######### Data Leakage and Noise Columns #########
 LEAKAGE_COLS = [
@@ -80,7 +132,7 @@ print("DF shape after dropping columns:", df.shape)
 
 ######### Train Test Split #########
 # As we have a time component in the dataset, we will perform a time-based split to avoid data leakage.
-df["order date (DateOrders)"] = pd.to_datetime(df["order date (DateOrders)"])
+# order date has already been converted to datetime during Feature Engineering
 df = df.sort_values("order date (DateOrders)")
 split_index = int(len(df) * (1 - TEST_SIZE))
 train_df = df.iloc[:split_index]

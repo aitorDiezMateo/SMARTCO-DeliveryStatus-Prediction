@@ -30,9 +30,6 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_sample_weight
 
 import xgboost as xgb
-from imblearn.combine import SMOTEENN, SMOTETomek
-from imblearn.over_sampling import ADASYN, RandomOverSampler, SMOTE
-from imblearn.under_sampling import RandomUnderSampler
 import importlib.util
 
 
@@ -51,24 +48,6 @@ def _load_fe_module():
     return module
 
 
-def _make_sampler(choice: str):
-    if choice == "none":
-        return None
-    if choice == "random_over":
-        return RandomOverSampler(random_state=42)
-    if choice == "random_under":
-        return RandomUnderSampler(random_state=42)
-    if choice == "adasyn":
-        return ADASYN(random_state=42)
-    if choice == "smote":
-        return SMOTE(random_state=42)
-    if choice == "smote_tomek":
-        return SMOTETomek(random_state=42)
-    if choice == "smote_enn":
-        return SMOTEENN(random_state=42)
-    raise ValueError(f"Unknown sampler choice: {choice}")
-
-
 ######### Paths and constants #########
 
 DATA_PATH = Path(__file__).parent.parent / "data"
@@ -78,7 +57,7 @@ OUTPUT_PATH = Path(__file__).parent.parent / "output" / "optuna"
 
 TARGET_COL = "Delivery Status"
 DATE_COL = "order date (DateOrders)"
-STUDY_NAME = "xgboost_v2"
+STUDY_NAME = "xgboost_study"
 N_TRIALS = 200
 DB_PATH = OUTPUT_PATH / "xgboost_study.db"
 N_SPLITS = 5
@@ -138,9 +117,9 @@ def objective(trial: optuna.Trial) -> float:
             "none",
             "random_over",
             "random_under",
-            "smote",
-            "smote_tomek",
-            "smote_enn",
+            "smotenc",
+            "smotenc_tomek",
+            "smotenc_enn",
         ],
     )
 
@@ -176,10 +155,13 @@ def objective(trial: optuna.Trial) -> float:
         **params,
     )
 
-    sampler = _make_sampler(sampler_choice)
+    sampler = fe_mod.make_resampler(
+        sampler_choice,
+        categorical_cols=list(cfg.low_card_cols) + list(cfg.high_card_cols),
+        random_state=42,
+    )
 
     pipe = fe_mod.build_pipeline(
-        df_example=X,
         model=model,
         oversampler=sampler,
         smoothing=smoothing,
@@ -282,7 +264,11 @@ best_sampler = best_params.get("sampler", "none")
 best_class_weight = best_params.get("class_weight", "none")
 best_smoothing = best_params.get("smoothing", 20.0)
 
-final_sampler = _make_sampler(best_sampler)
+final_sampler = fe_mod.make_resampler(
+    best_sampler,
+    categorical_cols=list(cfg.low_card_cols) + list(cfg.high_card_cols),
+    random_state=42,
+)
 
 final_model = xgb.XGBClassifier(
     objective="multi:softprob",
@@ -304,7 +290,6 @@ final_model = xgb.XGBClassifier(
 )
 
 final_pipe = fe_mod.build_pipeline(
-    df_example=X_train_full,
     model=final_model,
     oversampler=final_sampler,
     smoothing=best_smoothing,

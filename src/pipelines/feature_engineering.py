@@ -137,8 +137,13 @@ class HistoricalTargetStats(BaseEstimator, TransformerMixin):
         self.group_cols = tuple(group_cols)
         self.smoothing = float(smoothing)
 
-        self.classes_: Optional[np.ndarray] = np.array(list(classes)) if classes is not None else None
+        # sklearn.base.clone() relies on get_params(), which expects an attribute
+        # with the same name as the __init__ parameter ("classes" here).
+        # Without this, StackingClassifier fails during cloning.
+        # IMPORTANT: keep the parameter value unchanged.
+        # sklearn.clone() checks that __init__ does not modify parameters.
         self.classes = classes
+        self.classes_: Optional[np.ndarray] = np.array(list(classes)) if classes is not None else None
         self.global_priors_: Optional[np.ndarray] = None
         self._group_posteriors: dict[str, pd.DataFrame] = {}
         self._group_counts: dict[str, pd.Series] = {}

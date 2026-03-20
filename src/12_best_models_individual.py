@@ -1,12 +1,15 @@
 """
-Create (but do not train) the best-performing model objects from Optuna studies:
+Train the best Optuna models individually on the full training set and evaluate on the test set.
 
-- XGBoost (`src/07_XGBoost.py`)
-- CatBoost (`src/08_CatBoost.py`)
-- Bagging + RandomForest (`src/09_Bagging.py`)
+Models:
+- Best XGBoost (from Optuna study `xgboost_study`)
+- Best CatBoost (from Optuna study `catboost_v2`)
+- Best BaggingClassifier (from Optuna study `bagging__bagging`)
+- Best RandomForest (from Optuna study `bagging__rf`)
 
-This module loads the best hyperparameters from SQLite Optuna storages under
-`output/optuna/` and instantiates the corresponding estimators / pipelines.
+For each model:
+- prints metrics to stdout
+- saves predictions only to `output/predictions/`
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import importlib.util
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import optuna
@@ -23,11 +26,6 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import BaggingClassifier, RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import TimeSeriesSplit, KFold
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import StackingClassifier
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
@@ -36,17 +34,17 @@ from sklearn.metrics import (
     matthews_corrcoef,
     roc_auc_score,
 )
+from sklearn.preprocessing import LabelEncoder
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.class_weight import compute_class_weight
 
-######### Paths and constants #########
 
 ROOT = Path(__file__).parent.parent
 DATA_PATH = ROOT / "data"
-TRAIN_RAW_PATH = os.path.join(DATA_PATH, "processed", "train_raw.csv")
-TEST_RAW_PATH = os.path.join(DATA_PATH, "processed", "test_raw.csv")
+TRAIN_RAW_PATH = DATA_PATH / "processed" / "train_raw.csv"
+TEST_RAW_PATH = DATA_PATH / "processed" / "test_raw.csv"
 OUTPUT_OPTUNA = ROOT / "output" / "optuna"
 OUTPUT_PREDICTIONS = ROOT / "output" / "predictions"
-N_SPLITS = 5
 
 TARGET_COL = "Delivery Status"
 DATE_COL = "order date (DateOrders)"
@@ -55,11 +53,13 @@ RANDOM_STATE = 42
 
 def _load_fe_module():
     """Load `pipelines/feature_engineering.py` without relying on `src` package."""
+
     here = Path(__file__).parent
     fe_path = here / "pipelines" / "feature_engineering.py"
     spec = importlib.util.spec_from_file_location("fe_pipeline_module", fe_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load feature engineering module from {fe_path}")
+
     module = importlib.util.module_from_spec(spec)
     import sys
 
@@ -73,7 +73,6 @@ def _load_best_params(*, db_path: Path, study_name: str) -> dict[str, Any]:
     try:
         study = optuna.load_study(study_name=study_name, storage=storage_url)
     except KeyError as exc:
-        # Provide a helpful message (Optuna's default is just "Record does not exist.").
         try:
             available = [s.study_name for s in optuna.get_all_study_summaries(storage=storage_url)]
         except Exception:  # noqa: BLE001
@@ -91,17 +90,16 @@ def build_best_xgboost_pipeline():
     Returns an imblearn Pipeline from `pipelines/feature_engineering.build_pipeline`
     with an XGBClassifier configured with Optuna best params.
     """
+
     fe_mod = _load_fe_module()
     cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL, date_col=DATE_COL)
 
-    # Follow the current configuration in `src/07_XGBoost.py`.
-    # If other studies exist, they are treated as older versions.
     db_path = OUTPUT_OPTUNA / "xgboost_study.db"
     study_name = "xgboost_study"
     best = _load_best_params(db_path=db_path, study_name=study_name)
 
     sampler_choice = str(best.get("sampler", "none"))
-    class_weight_choice = str(best.get("class_weight", "none"))
+    _class_weight_choice = str(best.get("class_weight", "none"))
     smoothing = float(best.get("smoothing", 20.0))
 
     model = xgb.XGBClassifier(
@@ -139,10 +137,8 @@ def build_best_xgboost_pipeline():
     return {
         "pipeline": pipe,
         "best_params": best,
-        "db_path": str(db_path),
         "study_name": study_name,
         "sampler": sampler_choice,
-        "class_weight": class_weight_choice,
         "smoothing": smoothing,
     }
 
@@ -193,7 +189,6 @@ def build_best_bagging_pipeline():
     cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL, date_col=DATE_COL)
 
     db_path = OUTPUT_OPTUNA / "bagging_study.db"
-    # Follow the current configuration in `src/09_Bagging.py`.
     study_name = "bagging__bagging"
     best = _load_best_params(db_path=db_path, study_name=study_name)
 
@@ -214,14 +209,7 @@ def build_best_bagging_pipeline():
         classes=None,
         config=cfg,
     )
-    return {
-        "pipeline": pipe,
-        "best_params": best,
-        "db_path": str(db_path),
-        "study_name": study_name,
-        "sampler": sampler_choice,
-        "smoothing": smoothing,
-    }
+    return {"pipeline": pipe, "best_params": best, "study_name": study_name, "smoothing": smoothing}
 
 
 def build_best_random_forest_pipeline():
@@ -229,7 +217,6 @@ def build_best_random_forest_pipeline():
     cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL, date_col=DATE_COL)
 
     db_path = OUTPUT_OPTUNA / "bagging_study.db"
-    # Follow the current configuration in `src/09_Bagging.py`.
     study_name = "bagging__rf"
     best = _load_best_params(db_path=db_path, study_name=study_name)
 
@@ -253,9 +240,7 @@ def build_best_random_forest_pipeline():
     return {
         "pipeline": pipe,
         "best_params": best,
-        "db_path": str(db_path),
         "study_name": study_name,
-        "sampler": sampler_choice,
         "smoothing": smoothing,
     }
 
@@ -287,6 +272,8 @@ def _catboost_prepare_features(df: pd.DataFrame, cfg: CatBoostPrepConfig) -> tup
         raise ValueError(f"Expected date column '{cfg.date_col}' not found.")
 
     d = pd.to_datetime(X[cfg.date_col], errors="coerce")
+    if d.isna().any():
+        raise ValueError(f"Invalid datetime values found in '{cfg.date_col}'.")
     X["order_year"] = d.dt.year
     X["order_month"] = d.dt.month
     X["order_day"] = d.dt.day
@@ -301,6 +288,7 @@ def _catboost_prepare_features(df: pd.DataFrame, cfg: CatBoostPrepConfig) -> tup
         origin = X["Order Region"].astype(str).str.replace(" ", "_", regex=False)
         destination = X["Market"].astype(str).str.replace(" ", "_", regex=False)
         X["shipping_route"] = origin + "_to_" + destination
+
     if "Customer Country" in X.columns and "Order Country" in X.columns:
         X["is_cross_border"] = (X["Customer Country"] != X["Order Country"]).astype(int)
 
@@ -325,14 +313,13 @@ def _catboost_prepare_features(df: pd.DataFrame, cfg: CatBoostPrepConfig) -> tup
 
 
 def _encode_categoricals_for_sampling(
-    X: pd.DataFrame,
-    *,
-    cat_features: list[int],
+    X: pd.DataFrame, *, cat_features: list[int]
 ) -> tuple[np.ndarray, list[list[str]]]:
     """
     Encode cat columns to integer codes (fit on X only).
     Mirrors `src/08_CatBoost.py` sampling workflow for SMOTENC/SMOTE*.
     """
+
     X_enc = X.copy()
     categories: list[list[str]] = []
     for idx in cat_features:
@@ -351,12 +338,18 @@ def _decode_categoricals_after_sampling(
     cat_features: list[int],
     categories: list[list[str]],
 ) -> pd.DataFrame:
-    """Decode integer-coded categoricals back to strings after resampling."""
+    """
+    Decode integer-coded categoricals back to strings after resampling.
+    Mirrors `src/08_CatBoost.py`.
+    """
+
     X_df = pd.DataFrame(X_arr, columns=columns)
     for i, idx in enumerate(cat_features):
         col = columns[idx]
         cats = categories[i]
         codes = pd.to_numeric(X_df[col], errors="coerce").fillna(-1).astype(int).to_numpy()
+
+        # Map unknown/out-of-range to "<NA>" for CatBoost stability.
         out = np.full(len(codes), "<NA>", dtype=object)
         valid = (codes >= 0) & (codes < len(cats))
         if valid.any():
@@ -366,6 +359,10 @@ def _decode_categoricals_after_sampling(
 
 
 def _make_sampler(choice: str, *, cat_features: list[int]):
+    """
+    Build the imblearn sampler used by `src/08_CatBoost.py`.
+    """
+
     from imblearn.combine import SMOTEENN, SMOTETomek
     from imblearn.over_sampling import RandomOverSampler, SMOTENC
     from imblearn.under_sampling import RandomUnderSampler
@@ -391,12 +388,12 @@ def _make_sampler(choice: str, *, cat_features: list[int]):
     raise ValueError(f"Unknown sampler choice: {choice}")
 
 
-class CatBoostBestWorkflow(BaseEstimator, ClassifierMixin):
+class CatBoostBestWorkflow(ClassifierMixin, BaseEstimator):
     """
-    CatBoost wrapper applying the exact workflow from `src/08_CatBoost.py`:
-    - same deterministic feature prep (`_catboost_prepare_features`)
-    - same sampling logic (including SMOTENC/SMOTE* encode/decode)
-    - same optional class weights when `sampler == "none"`
+    CatBoost sklearn-compatible wrapper implementing the exact workflow from `src/08_CatBoost.py`:
+    - same feature engineering (`_catboost_prepare_features`)
+    - same sampling strategy (including SMOTENC/SMOTE* categorical encode/decode)
+    - same optional class-weight behavior when sampler == "none"
     """
 
     def __init__(
@@ -406,24 +403,19 @@ class CatBoostBestWorkflow(BaseEstimator, ClassifierMixin):
         prep_cfg: CatBoostPrepConfig | None = None,
         task_type: str = "GPU",
         devices: str = "0",
-        classes: Any | None = None,
     ) -> None:
         self.best_params = best_params
         self.prep_cfg = prep_cfg or CatBoostPrepConfig()
         self.task_type = task_type
         self.devices = devices
-        # Keep init parameter name stable for sklearn.clone().
-        self.classes = classes
-        self.classes_: np.ndarray | None = None
-        self.model_: Any | None = None
+        self.model: Any | None = None
 
     def fit(self, X, y):  # noqa: ANN001
         try:
-            from catboost import CatBoostClassifier
+            from catboost import CatBoostClassifier  # type: ignore
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
-                "catboost is not installed in the current environment. "
-                "Install it (e.g. `pip install catboost`)."
+                "catboost is not installed in the current environment. Install it (e.g. `pip install catboost`)."
             ) from exc
 
         X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
@@ -441,6 +433,7 @@ class CatBoostBestWorkflow(BaseEstimator, ClassifierMixin):
         final_sampler = _make_sampler(best_sampler, cat_features=cat_idx)
         if final_sampler is not None:
             if best_sampler in {"smote", "smote_tomek", "smote_enn"}:
+                # For SMOTENC / SMOTE* we encode categoricals to integer codes first.
                 X_arr, cats = _encode_categoricals_for_sampling(X_train_final, cat_features=cat_idx)
                 X_res_arr, y_res = final_sampler.fit_resample(X_arr, y_train_final)
                 X_train_final = _decode_categoricals_after_sampling(
@@ -455,20 +448,17 @@ class CatBoostBestWorkflow(BaseEstimator, ClassifierMixin):
                 X_train_final = pd.DataFrame(X_res, columns=X_train_final.columns)
                 y_train_final = np.asarray(y_res)
         else:
+            # sampler == "none": allow class weights selection exactly like `src/08_CatBoost.py`.
             if best_class_weight_method == "compute_balanced":
                 classes = np.unique(y_train_final)
-                weights = compute_class_weight(
-                    class_weight="balanced",
-                    classes=classes,
-                    y=y_train_final,
-                )
+                weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train_final)
                 final_class_weights = {int(c): float(w) for c, w in zip(classes, weights)}
             elif best_class_weight_method == "auto_balanced":
                 final_auto_class_weights = "Balanced"
             elif best_class_weight_method == "auto_sqrt_balanced":
                 final_auto_class_weights = "SqrtBalanced"
 
-        self.model_ = CatBoostClassifier(
+        self.model = CatBoostClassifier(
             loss_function="MultiClass",
             eval_metric="TotalF1",
             task_type=self.task_type,
@@ -487,32 +477,26 @@ class CatBoostBestWorkflow(BaseEstimator, ClassifierMixin):
             border_count=int(self.best_params["border_count"]),
         )
 
-        self.model_.fit(X_train_final, y_train_final, cat_features=cat_idx)
-
-        if self.classes is not None:
-            self.classes_ = np.asarray(list(self.classes))
-        else:
-            y_arr = np.asarray(y_train_final)
-            self.classes_ = np.array(sorted(np.unique(y_arr)))
-
+        # Note: in this script y is already label-encoded (0..K-1).
+        self.model.fit(X_train_final, y_train_final, cat_features=cat_idx)
         return self
 
     def predict(self, X):  # noqa: ANN001
-        if self.model_ is None:
+        if self.model is None:
             raise RuntimeError("CatBoostBestWorkflow: call fit() before predict().")
 
         X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
         X_prep, _ = _catboost_prepare_features(X_df, self.prep_cfg)
-        pred = np.asarray(self.model_.predict(X_prep)).reshape(-1)
+        pred = np.asarray(self.model.predict(X_prep)).reshape(-1)
         return pred.astype(int)
 
     def predict_proba(self, X):  # noqa: ANN001
-        if self.model_ is None:
+        if self.model is None:
             raise RuntimeError("CatBoostBestWorkflow: call fit() before predict_proba().")
 
         X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
         X_prep, _ = _catboost_prepare_features(X_df, self.prep_cfg)
-        return np.asarray(self.model_.predict_proba(X_prep))
+        return np.asarray(self.model.predict_proba(X_prep))
 
 
 def build_best_catboost_model(*, n_classes: int):
@@ -521,162 +505,168 @@ def build_best_catboost_model(*, n_classes: int):
 
     task_type = os.environ.get("CATBOOST_TASK_TYPE", "GPU").upper()
     devices = os.environ.get("CATBOOST_DEVICES", "0")
-
-    # NOTE: We preserve the best hyperparameters. Any sampling strategy stored in Optuna
-    # params is returned as metadata; actual resampling happens at training time.
-    sampler_choice = str(best.get("sampler", "none"))
-    class_weight_method = str(best.get("class_weight_method", "none"))
+    if task_type not in {"CPU", "GPU"}:
+        raise ValueError("CATBOOST_TASK_TYPE must be 'CPU' or 'GPU'.")
 
     wrapped = CatBoostBestWorkflow(
         best_params=best,
         prep_cfg=CatBoostPrepConfig(),
         task_type=task_type,
         devices=devices,
-        classes=np.arange(n_classes, dtype=int),
     )
-    return {
-        "model": wrapped,
-        "best_params": best,
-        "sampler": sampler_choice,
-        "class_weight_method": class_weight_method,
-    }
+    return {"model": wrapped, "best_params": best}
 
 
-def build_best_base_models(*, n_classes: int):
-    """
-    Convenience: build all best model objects (untrained).
-    """
-    return {
-        "xgboost": build_best_xgboost_pipeline(),
-        "catboost": build_best_catboost_model(n_classes=n_classes),
-        "bagging": build_best_bagging_pipeline(),
-        "random_forest": build_best_random_forest_pipeline(),
-    }
+def _evaluate_and_save_predictions(
+    *,
+    model_name: str,
+    model: Any,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_test: pd.DataFrame,
+    y_test: np.ndarray,
+    y_test_raw_df: pd.DataFrame,
+    le: LabelEncoder,
+) -> None:
+    print(f"\n=== Training/evaluating: {model_name} ===")
+    model.fit(X_train, y_train)
 
-######### Load training data #########
-df = pd.read_csv(TRAIN_RAW_PATH)
-if TARGET_COL not in df.columns:
+    y_pred = model.predict(X_test)
+    y_pred_labels = le.inverse_transform(y_pred)
+
+    # Metrics (print only)
+    print("=== Classification report (macro/weighted are imbalance-friendly) ===")
+    print(
+        classification_report(
+            y_test,
+            y_pred,
+            target_names=[str(c) for c in le.classes_],
+            digits=4,
+            zero_division=0,
+        )
+    )
+    print(f"MCC: {matthews_corrcoef(y_test, y_pred):.6f}")
+    print(f"Balanced accuracy: {balanced_accuracy_score(y_test, y_pred):.6f}")
+    print(f"F1 macro: {f1_score(y_test, y_pred, average='macro'):.6f}")
+    print(f"F1 weighted: {f1_score(y_test, y_pred, average='weighted'):.6f}")
+
+    y_proba: Optional[np.ndarray]
+    try:
+        y_proba = model.predict_proba(X_test)
+    except Exception:  # noqa: BLE001
+        y_proba = None
+
+    if y_proba is not None:
+        print("=== Probabilistic metrics (one-vs-rest for multiclass) ===")
+        print(f"ROC-AUC macro (OVR): {roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro'):.6f}")
+        print(
+            f"ROC-AUC weighted (OVR): {roc_auc_score(y_test, y_proba, multi_class='ovr', average='weighted'):.6f}"
+        )
+
+        n_classes = int(np.unique(y_test).size)
+        y_true_ovr = np.eye(n_classes, dtype=int)[y_test]
+        pr_auc_macro = average_precision_score(y_true_ovr, y_proba, average="macro")
+        pr_auc_weighted = average_precision_score(y_true_ovr, y_proba, average="weighted")
+        print(f"PR-AUC macro (OVR): {pr_auc_macro:.6f}")
+        print(f"PR-AUC weighted (OVR): {pr_auc_weighted:.6f}")
+
+    # Save predictions only
+    OUTPUT_PREDICTIONS.mkdir(parents=True, exist_ok=True)
+
+    preds_df = y_test_raw_df[[TARGET_COL]].copy()
+    preds_df["prediction"] = y_pred_labels
+
+    if y_proba is not None:
+        for class_idx, class_name in enumerate(le.classes_):
+            preds_df[f"proba_{class_name}"] = y_proba[:, class_idx]
+
+    pred_path = OUTPUT_PREDICTIONS / f"{model_name.lower().replace(' ', '_')}_predictions.csv"
+    preds_df.to_csv(pred_path, index=False)
+    print("\nSaved predictions:")
+    print(f"- {pred_path}")
+
+
+######### Load data #########
+train_df = pd.read_csv(TRAIN_RAW_PATH)
+test_df = pd.read_csv(TEST_RAW_PATH)
+
+if TARGET_COL not in train_df.columns:
     raise ValueError(f"Target column '{TARGET_COL}' not found in {TRAIN_RAW_PATH}")
-if DATE_COL not in df.columns:
+if DATE_COL not in train_df.columns:
     raise ValueError(f"Date column '{DATE_COL}' not found in {TRAIN_RAW_PATH}")
-
-df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-if df[DATE_COL].isna().any():
-    raise ValueError(
-        f"Date column '{DATE_COL}' contains invalid values after parsing. "
-        "Please ensure it can be parsed as datetime."
-    )
-
-df = df.sort_values(DATE_COL).reset_index(drop=True)
-
-y_raw = df[TARGET_COL].astype(str)
-X = df.drop(columns=[TARGET_COL])
-
-######### Load testing data #########
-
-df_test = pd.read_csv(TEST_RAW_PATH)
-if TARGET_COL not in df_test.columns:
+if TARGET_COL not in test_df.columns:
     raise ValueError(f"Target column '{TARGET_COL}' not found in {TEST_RAW_PATH}")
-if DATE_COL not in df_test.columns:
+if DATE_COL not in test_df.columns:
     raise ValueError(f"Date column '{DATE_COL}' not found in {TEST_RAW_PATH}")
 
-df_test[DATE_COL] = pd.to_datetime(df_test[DATE_COL], errors="coerce")
-if df_test[DATE_COL].isna().any():
-    raise ValueError(
-        f"Date column '{DATE_COL}' contains invalid values after parsing. "
-        "Please ensure it can be parsed as datetime."
-    )
+train_df[DATE_COL] = pd.to_datetime(train_df[DATE_COL], errors="coerce")
+test_df[DATE_COL] = pd.to_datetime(test_df[DATE_COL], errors="coerce")
+if train_df[DATE_COL].isna().any():
+    raise ValueError("Train date parsing produced NaT values. Please check DATE_COL.")
+if test_df[DATE_COL].isna().any():
+    raise ValueError("Test date parsing produced NaT values. Please check DATE_COL.")
 
-df_test = df_test.sort_values(DATE_COL).reset_index(drop=True)
+train_df = train_df.sort_values(DATE_COL).reset_index(drop=True)
+test_df = test_df.sort_values(DATE_COL).reset_index(drop=True)
 
-X_test = df_test.drop(columns=[TARGET_COL])
-y_test_raw = df_test[TARGET_COL].astype(str)
+X_train = train_df.drop(columns=[TARGET_COL])
+X_test = test_df.drop(columns=[TARGET_COL])
+
+y_train_raw = train_df[TARGET_COL].astype(str)
+y_test_raw = test_df[TARGET_COL].astype(str)
 
 ######### Encode target #########
-
 le = LabelEncoder()
-y = le.fit_transform(y_raw)
-n_classes = int(np.unique(y).size)
-
-######### Cross-validation configuration #########
-
-# tscv = TimeSeriesSplit(n_splits=N_SPLITS)
-# cv_splits = list(tscv.split(X))
-tscv = KFold(n_splits=N_SPLITS, shuffle=False) 
-cv_splits = list(tscv.split(X))
-
-######### Build Stacked Base Models #########
-
-base_models = build_best_base_models(n_classes=n_classes)
-
-######### Build StackingClassifier #########
-stacking_model = StackingClassifier(
-    estimators=[
-        ("xgboost", base_models["xgboost"]["pipeline"]),
-        ("catboost", base_models["catboost"]["model"]),
-        ("bagging", base_models["bagging"]["pipeline"]),
-        ("random_forest", base_models["random_forest"]["pipeline"]),
-    ],
-    final_estimator=LogisticRegression(
-        random_state=RANDOM_STATE,
-    ),
-    cv = tscv,
-    stack_method="predict_proba",
-)
-
-######### Train stacking model #########
-stacking_model.fit(X, y)
-
-######### Evaluate stacking model #########
+y_train = le.fit_transform(y_train_raw)
 y_test = le.transform(y_test_raw)
-y_pred = stacking_model.predict(X_test)
 
-try:
-    y_proba = stacking_model.predict_proba(X_test)
-except Exception:  # noqa: BLE001
-    y_proba = None
+n_classes = int(np.unique(y_train).size)
 
-print("=== Classification report (macro/weighted are imbalance-friendly) ===")
-print(
-    classification_report(
-        y_test,
-        y_pred,
-        target_names=[str(c) for c in le.classes_],
-        digits=4,
-        zero_division=0,
-    )
+######### Build best base models #########
+xgb_bundle = build_best_xgboost_pipeline()
+cat_bundle = build_best_catboost_model(n_classes=n_classes)
+bag_bundle = build_best_bagging_pipeline()
+rf_bundle = build_best_random_forest_pipeline()
+
+######### Evaluate and save predictions #########
+_evaluate_and_save_predictions(
+    model_name="XGBoost",
+    model=xgb_bundle["pipeline"],
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    y_test=y_test,
+    y_test_raw_df=test_df,
+    le=le,
+)
+_evaluate_and_save_predictions(
+    model_name="CatBoost",
+    model=cat_bundle["model"],
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    y_test=y_test,
+    y_test_raw_df=test_df,
+    le=le,
+)
+_evaluate_and_save_predictions(
+    model_name="Bagging",
+    model=bag_bundle["pipeline"],
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    y_test=y_test,
+    y_test_raw_df=test_df,
+    le=le,
+)
+_evaluate_and_save_predictions(
+    model_name="RandomForest",
+    model=rf_bundle["pipeline"],
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    y_test=y_test,
+    y_test_raw_df=test_df,
+    le=le,
 )
 
-print(f"MCC: {matthews_corrcoef(y_test, y_pred):.6f}")
-print(f"Balanced accuracy: {balanced_accuracy_score(y_test, y_pred):.6f}")
-print(f"F1 macro: {f1_score(y_test, y_pred, average='macro'):.6f}")
-print(f"F1 weighted: {f1_score(y_test, y_pred, average='weighted'):.6f}")
-
-if y_proba is not None:
-    print("=== Probabilistic metrics (one-vs-rest for multiclass) ===")
-    print(f"ROC-AUC macro (OVR): {roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro'):.6f}")
-    print(f"ROC-AUC weighted (OVR): {roc_auc_score(y_test, y_proba, multi_class='ovr', average='weighted'):.6f}")
-
-    y_true_ovr = np.eye(n_classes, dtype=int)[y_test]
-    pr_auc_macro = average_precision_score(y_true_ovr, y_proba, average="macro")
-    pr_auc_weighted = average_precision_score(y_true_ovr, y_proba, average="weighted")
-    print(f"PR-AUC macro (OVR): {pr_auc_macro:.6f}")
-    print(f"PR-AUC weighted (OVR): {pr_auc_weighted:.6f}")
-
-######### Save predictions #########
-
-OUTPUT_PREDICTIONS.mkdir(parents=True, exist_ok=True)
-
-y_pred_labels = le.inverse_transform(y_pred)
-preds_df = df_test[[TARGET_COL]].copy()
-preds_df["prediction"] = y_pred_labels
-
-if y_proba is not None:
-    for class_idx, class_name in enumerate(le.classes_):
-        preds_df[f"proba_{class_name}"] = y_proba[:, class_idx]
-
-pred_path = OUTPUT_PREDICTIONS / "stacking_predictions.csv"
-preds_df.to_csv(pred_path, index=False)
-
-print("\nSaved predictions:")
-print(f"- {pred_path}")

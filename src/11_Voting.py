@@ -36,6 +36,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils.class_weight import compute_class_weight
 
 ######### Paths and constants #########
 
@@ -43,15 +44,15 @@ ROOT = Path(__file__).parent.parent
 DATA_PATH = ROOT / "data"
 TRAIN_RAW_PATH = DATA_PATH / "processed" / "train_raw.csv"
 TEST_RAW_PATH = DATA_PATH / "processed" / "test_raw.csv"
-OUTPUT_PROCESSED = DATA_PATH / "processed"
 OUTPUT_OPTUNA = ROOT / "output" / "optuna"
+OUTPUT_PREDICTIONS = ROOT / "output" / "predictions"
 
 TARGET_COL = "Delivery Status"
 DATE_COL = "order date (DateOrders)"
 RANDOM_STATE = 42
 
 # Voting configuration: set VOTING_MODE=hard or VOTING_MODE=soft.
-VOTING_MODE = os.environ.get("VOTING_MODE", "soft").strip().lower()
+VOTING_MODE = os.environ.get("VOTING_MODE", "hard").strip().lower()
 if VOTING_MODE not in {"hard", "soft"}:
 	raise ValueError("VOTING_MODE must be 'hard' or 'soft'.")
 
@@ -92,7 +93,7 @@ def build_best_xgboost_pipeline():
 	cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL, date_col=DATE_COL)
 
 	db_path = OUTPUT_OPTUNA / "xgboost_study.db"
-	best = _load_best_params(db_path=db_path, study_name="xgboost")
+	best = _load_best_params(db_path=db_path, study_name="xgboost_study")
 
 	sampler_choice = str(best.get("sampler", "none"))
 	smoothing = float(best.get("smoothing", 20.0))
@@ -103,7 +104,7 @@ def build_best_xgboost_pipeline():
 		tree_method="hist",
 		device="cuda",
 		random_state=RANDOM_STATE,
-		n_jobs=1,
+		n_jobs=-1,
 		n_estimators=int(best["n_estimators"]),
 		max_depth=int(best["max_depth"]),
 		learning_rate=float(best["learning_rate"]),
@@ -168,7 +169,7 @@ def build_best_bagging_pipeline():
 	cfg = fe_mod.FeatureEngineeringConfig(target_col=TARGET_COL, date_col=DATE_COL)
 
 	db_path = OUTPUT_OPTUNA / "bagging_study.db"
-	best = _load_best_params(db_path=db_path, study_name="bagging")
+	best = _load_best_params(db_path=db_path, study_name="bagging__bagging")
 
 	sampler_choice = str(best.get("sampler", "none"))
 	smoothing = float(best.get("smoothing", 20.0))
@@ -262,41 +263,201 @@ def _catboost_prepare_features(df: pd.DataFrame, cfg: CatBoostPrepConfig) -> tup
 	return X, cat_feature_indices
 
 
-class CatBoostAutoCatFeatures(ClassifierMixin, BaseEstimator):
-	"""Sklearn-compatible wrapper that auto-infers CatBoost categorical indices."""
+def _encode_categoricals_for_sampling(
+	X: pd.DataFrame,
+	*,
+	cat_features: list[int],
+) -> tuple[np.ndarray, list[list[str]]]:
+	"""
+	Encode cat columns to integer codes (fit on X only).
+	Mirrors `src/08_CatBoost.py` sampling workflow for SMOTENC/SMOTE*.
+	"""
+	X_enc = X.copy()
+	categories: list[list[str]] = []
+	for idx in cat_features:
+		col = X_enc.columns[idx]
+		s = X_enc[col].astype(str).fillna("<NA>")
+		cat = pd.Categorical(s)
+		X_enc[col] = cat.codes.astype(int)
+		categories.append([str(v) for v in cat.categories.tolist()])
+	return X_enc.to_numpy(), categories
 
-	def __init__(self, model: Any, *, prep_cfg: CatBoostPrepConfig | None = None) -> None:
-		self.model = model
+
+def _decode_categoricals_after_sampling(
+	X_arr: np.ndarray,
+	*,
+	columns: list[str],
+	cat_features: list[int],
+	categories: list[list[str]],
+) -> pd.DataFrame:
+	"""Decode integer-coded categoricals back to strings after resampling."""
+	X_df = pd.DataFrame(X_arr, columns=columns)
+	for i, idx in enumerate(cat_features):
+		col = columns[idx]
+		cats = categories[i]
+		codes = pd.to_numeric(X_df[col], errors="coerce").fillna(-1).astype(int).to_numpy()
+		out = np.full(len(codes), "<NA>", dtype=object)
+		valid = (codes >= 0) & (codes < len(cats))
+		if valid.any():
+			out[valid] = np.array(cats, dtype=object)[codes[valid]]
+		X_df[col] = out.astype(str)
+	return X_df
+
+
+def _make_sampler(choice: str, *, cat_features: list[int]):
+	from imblearn.combine import SMOTEENN, SMOTETomek
+	from imblearn.over_sampling import RandomOverSampler, SMOTENC
+	from imblearn.under_sampling import RandomUnderSampler
+
+	if choice == "none":
+		return None
+	if choice == "random_over":
+		return RandomOverSampler(random_state=RANDOM_STATE)
+	if choice == "random_under":
+		return RandomUnderSampler(random_state=RANDOM_STATE)
+	if choice == "smote":
+		return SMOTENC(categorical_features=cat_features, random_state=RANDOM_STATE)
+	if choice == "smote_tomek":
+		return SMOTETomek(
+			smote=SMOTENC(categorical_features=cat_features, random_state=RANDOM_STATE),
+			random_state=RANDOM_STATE,
+		)
+	if choice == "smote_enn":
+		return SMOTEENN(
+			smote=SMOTENC(categorical_features=cat_features, random_state=RANDOM_STATE),
+			random_state=RANDOM_STATE,
+		)
+	raise ValueError(f"Unknown sampler choice: {choice}")
+
+
+class CatBoostBestWorkflow(ClassifierMixin, BaseEstimator):
+	"""
+	CatBoost wrapper applying the exact workflow from `src/08_CatBoost.py`:
+	- same deterministic feature prep (`_catboost_prepare_features`)
+	- same sampling logic (including SMOTENC/SMOTE* encode/decode)
+	- same optional class weights when `sampler == "none"`
+	"""
+
+	def __init__(
+		self,
+		*,
+		best_params: dict[str, Any],
+		prep_cfg: CatBoostPrepConfig | None = None,
+		task_type: str = "GPU",
+		devices: str = "0",
+		classes: Any | None = None,
+	) -> None:
+		self.best_params = best_params
 		self.prep_cfg = prep_cfg or CatBoostPrepConfig()
+		self.task_type = task_type
+		self.devices = devices
+		# Keep init parameter name stable for sklearn.clone().
+		self.classes = classes
+		self.classes_: np.ndarray | None = None
+		self.model_: Any | None = None
 
 	def fit(self, X, y):  # noqa: ANN001
+		try:
+			from catboost import CatBoostClassifier
+		except ModuleNotFoundError as exc:
+			raise ModuleNotFoundError(
+				"catboost is not installed in the current environment. "
+				"Install it (e.g. `pip install catboost`)."
+			) from exc
+
 		X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
 		X_prep, cat_idx = _catboost_prepare_features(X_df, self.prep_cfg)
-		self.model.fit(X_prep, y, cat_features=cat_idx)
-		self.classes_ = np.unique(y)
+
+		X_train_final = X_prep
+		y_train_final = np.asarray(y)
+
+		best_sampler = str(self.best_params.get("sampler", "none"))
+		best_class_weight_method = str(self.best_params.get("class_weight_method", "none"))
+
+		final_class_weights = None
+		final_auto_class_weights = None
+
+		final_sampler = _make_sampler(best_sampler, cat_features=cat_idx)
+		if final_sampler is not None:
+			# For SMOTENC / SMOTE* we encode categoricals to integer codes first.
+			if best_sampler in {"smote", "smote_tomek", "smote_enn"}:
+				X_arr, cats = _encode_categoricals_for_sampling(X_train_final, cat_features=cat_idx)
+				X_res_arr, y_res = final_sampler.fit_resample(X_arr, y_train_final)
+				X_train_final = _decode_categoricals_after_sampling(
+					X_res_arr,
+					columns=X_train_final.columns.tolist(),
+					cat_features=cat_idx,
+					categories=cats,
+				)
+				y_train_final = np.asarray(y_res)
+			else:
+				X_res, y_res = final_sampler.fit_resample(X_train_final, y_train_final)
+				X_train_final = pd.DataFrame(X_res, columns=X_train_final.columns)
+				y_train_final = np.asarray(y_res)
+		else:
+			# sampler == "none": preserve the class weight workflow from `src/08_CatBoost.py`.
+			if best_class_weight_method == "compute_balanced":
+				classes = np.unique(y_train_final)
+				weights = compute_class_weight(
+					class_weight="balanced",
+					classes=classes,
+					y=y_train_final,
+				)
+				final_class_weights = {int(c): float(w) for c, w in zip(classes, weights)}
+			elif best_class_weight_method == "auto_balanced":
+				final_auto_class_weights = "Balanced"
+			elif best_class_weight_method == "auto_sqrt_balanced":
+				final_auto_class_weights = "SqrtBalanced"
+
+		self.model_ = CatBoostClassifier(
+			loss_function="MultiClass",
+			eval_metric="TotalF1",
+			task_type=self.task_type,
+			devices=self.devices,
+			random_seed=RANDOM_STATE,
+			verbose=False,
+			allow_writing_files=False,
+			class_weights=final_class_weights,
+			auto_class_weights=final_auto_class_weights,
+			iterations=int(self.best_params["iterations"]),
+			depth=int(self.best_params["depth"]),
+			learning_rate=float(self.best_params["learning_rate"]),
+			l2_leaf_reg=float(self.best_params["l2_leaf_reg"]),
+			random_strength=float(self.best_params["random_strength"]),
+			bagging_temperature=float(self.best_params["bagging_temperature"]),
+			border_count=int(self.best_params["border_count"]),
+		)
+
+		self.model_.fit(X_train_final, y_train_final, cat_features=cat_idx)
+
+		# Expose `classes_` for sklearn stacking internals / cloning.
+		if self.classes is not None:
+			self.classes_ = np.asarray(list(self.classes))
+		else:
+			y_arr = np.asarray(y_train_final)
+			self.classes_ = np.array(sorted(np.unique(y_arr)))
+
 		return self
 
 	def predict(self, X):  # noqa: ANN001
+		if self.model_ is None:
+			raise RuntimeError("CatBoostBestWorkflow: call fit() before predict().")
+
 		X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
 		X_prep, _ = _catboost_prepare_features(X_df, self.prep_cfg)
-		pred = np.asarray(self.model.predict(X_prep)).reshape(-1)
+		pred = np.asarray(self.model_.predict(X_prep)).reshape(-1)
 		return pred.astype(int)
 
 	def predict_proba(self, X):  # noqa: ANN001
+		if self.model_ is None:
+			raise RuntimeError("CatBoostBestWorkflow: call fit() before predict_proba().")
+
 		X_df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
 		X_prep, _ = _catboost_prepare_features(X_df, self.prep_cfg)
-		return np.asarray(self.model.predict_proba(X_prep))
+		return np.asarray(self.model_.predict_proba(X_prep))
 
 
 def build_best_catboost_model():
-	try:
-		from catboost import CatBoostClassifier
-	except ModuleNotFoundError as exc:
-		raise ModuleNotFoundError(
-			"catboost is not installed in the current environment. "
-			"Install it (e.g. `pip install catboost`) to build the CatBoost model."
-		) from exc
-
 	db_path = OUTPUT_OPTUNA / "catboost_study.db"
 	best = _load_best_params(db_path=db_path, study_name="catboost_v2")
 
@@ -306,30 +467,18 @@ def build_best_catboost_model():
 	sampler_choice = str(best.get("sampler", "none"))
 	class_weight_method = str(best.get("class_weight_method", "none"))
 
-	model = CatBoostClassifier(
-		loss_function="MultiClass",
-		eval_metric="TotalF1",
+	wrapped = CatBoostBestWorkflow(
+		best_params=best,
+		prep_cfg=CatBoostPrepConfig(),
 		task_type=task_type,
 		devices=devices,
-		random_seed=RANDOM_STATE,
-		verbose=False,
-		allow_writing_files=False,
-		iterations=int(best["iterations"]),
-		depth=int(best["depth"]),
-		learning_rate=float(best["learning_rate"]),
-		l2_leaf_reg=float(best["l2_leaf_reg"]),
-		random_strength=float(best["random_strength"]),
-		bagging_temperature=float(best["bagging_temperature"]),
-		border_count=int(best["border_count"]),
+		classes=np.arange(n_classes, dtype=int),
 	)
-
-	wrapped = CatBoostAutoCatFeatures(model=model, prep_cfg=CatBoostPrepConfig())
 	return {
 		"model": wrapped,
-		"raw_model": model,
 		"best_params": best,
 		"sampler": sampler_choice,
-		"class_weight_method": class_weight_method
+		"class_weight_method": class_weight_method,
 	}
 
 
@@ -440,19 +589,7 @@ if y_proba is not None:
 	print(f"PR-AUC weighted (OVR): {pr_auc_weighted:.6f}")
 
 ######### Save outputs #########
-
-OUTPUT_PROCESSED.mkdir(parents=True, exist_ok=True)
-
-report_dict = classification_report(
-	y_test,
-	y_pred,
-	target_names=[str(c) for c in le.classes_],
-	output_dict=True,
-	zero_division=0,
-)
-report_df = pd.DataFrame(report_dict).transpose()
-report_path = OUTPUT_PROCESSED / "voting_classification_report.csv"
-report_df.to_csv(report_path, index=True)
+OUTPUT_PREDICTIONS.mkdir(parents=True, exist_ok=True)
 
 preds_df = test_df[[TARGET_COL]].copy()
 preds_df["prediction"] = y_pred_labels
@@ -461,9 +598,8 @@ if y_proba is not None:
 	for class_idx, class_name in enumerate(le.classes_):
 		preds_df[f"proba_{class_name}"] = y_proba[:, class_idx]
 
-pred_path = OUTPUT_PROCESSED / "voting_predictions.csv"
+pred_path = OUTPUT_PREDICTIONS / f"voting_{VOTING_MODE}_predictions.csv"
 preds_df.to_csv(pred_path, index=False)
 
-print("\nSaved files:")
-print(f"- {report_path}")
+print("\nSaved predictions:")
 print(f"- {pred_path}")

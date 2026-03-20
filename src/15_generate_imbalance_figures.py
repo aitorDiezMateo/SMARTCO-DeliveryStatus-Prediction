@@ -419,20 +419,58 @@ def plot_heatmap_by_model_type(df: pd.DataFrame, out_dir: Path) -> None:
     savefig(fig, out_dir / "heatmap_model_mitigation.png")
 
 
+def _add_sampler_category_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For the sampler comparison plots, we need to split trials where `sampler="none"` into:
+      - `None`: sampler="none" and weights disabled
+      - `Class Weights`: sampler="none" and weights_only
+    For trials using any resampler, the category is the sampler name.
+    """
+    df2 = df.copy()
+    # Default: use sampler as the category.
+    df2["sampler_category"] = df2["sampler"].astype(str)
+
+    mask_none_no_weights = (df2["sampler"] == "none") & (df2["mitigation_group"] == "none")
+    df2.loc[mask_none_no_weights, "sampler_category"] = "none"
+
+    mask_class_weights = (df2["sampler"] == "none") & (df2["mitigation_group"] == "weights_only")
+    df2.loc[mask_class_weights, "sampler_category"] = "class_weights"
+
+    # Group SMOTE with SMOTENC (including hybrid variants) for visualization clarity.
+    # In this project, CatBoost uses labels {"smote", "smote_tomek", "smote_enn"} but internally
+    # the implementation is SMOTENC-based (SMOTETomek/SMOTEENN built on SMOTENC).
+    canon_map = {
+        "smotenc": "smote",
+        "smotenc_tomek": "smote_tomek",
+        "smotenc_enn": "smote_enn",
+    }
+    df2["sampler_category"] = df2["sampler_category"].map(lambda s: canon_map.get(s, s))
+
+    return df2
+
+
 def plot_sampler_global_performance(df: pd.DataFrame, out_dir: Path, *, min_count: int = 10) -> None:
-    counts = df["sampler"].value_counts()
-    keep = counts[counts >= min_count].index
-    sub = df[df["sampler"].isin(keep)].copy()
+    df2 = _add_sampler_category_column(df)
+
+    counts = df2["sampler_category"].value_counts()
+    keep = set(counts[counts >= min_count].index.tolist())
+    # Always show assignment-critical categories.
+    keep.update({"none", "class_weights"})
+    # `ADASYN` can be rare; force it to appear if it exists.
+    if "adasyn" in counts.index:
+        keep.add("adasyn")
+
+    sub = df2[df2["sampler_category"].isin(keep)].copy()
     if sub.empty:
         return
 
     order = (
-        sub.groupby("sampler")["value"]
+        sub.groupby("sampler_category")["value"]
         .mean()
         .sort_values(ascending=False)
         .index.tolist()
     )
-    sub["sampler_order"] = sub["sampler"].astype(pd.CategoricalDtype(categories=order, ordered=True))
+    sub["sampler_order"] = sub["sampler_category"].astype(pd.CategoricalDtype(categories=order, ordered=True))
 
     fig, ax = plt.subplots(figsize=(12, 6))
     sns.boxplot(
@@ -455,7 +493,14 @@ def plot_sampler_global_performance(df: pd.DataFrame, out_dir: Path, *, min_coun
         ax=ax,
     )
 
-    xlabels = [pretty_sampler(s) for s in order]
+    def pretty_category(cat: str) -> str:
+        if cat == "none":
+            return "None"
+        if cat == "class_weights":
+            return "Class Weights"
+        return pretty_sampler(cat)
+
+    xlabels = [pretty_category(s) for s in order]
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels(xlabels, rotation=25, ha="right")
     ax.set_title("Effectiveness of Each Sampler (Global Optuna Trials)")
@@ -466,18 +511,23 @@ def plot_sampler_global_performance(df: pd.DataFrame, out_dir: Path, *, min_coun
 
 
 def plot_sampler_performance_by_model(df: pd.DataFrame, out_dir: Path, *, min_count: int = 10) -> None:
+    df2 = _add_sampler_category_column(df)
     model_types = sorted(set(df["model_type"]))
     if not model_types:
         return
 
-    counts = df["sampler"].value_counts()
-    keep = counts[counts >= min_count].index.tolist()
-    df2 = df[df["sampler"].isin(keep)].copy()
+    counts = df2["sampler_category"].value_counts()
+    keep = set(counts[counts >= min_count].index.tolist())
+    keep.update({"none", "class_weights"})
+    # `ADASYN` can be rare; force it to appear if it exists.
+    if "adasyn" in counts.index:
+        keep.add("adasyn")
+    df2 = df2[df2["sampler_category"].isin(keep)].copy()
     if df2.empty:
         return
 
     # Use global sampler order for consistent visual comparison.
-    global_order = df2.groupby("sampler")["value"].mean().sort_values(ascending=False).index.tolist()
+    global_order = df2.groupby("sampler_category")["value"].mean().sort_values(ascending=False).index.tolist()
     n = len(model_types)
     ncols = 2
     nrows = int(np.ceil(n / ncols))
@@ -492,8 +542,8 @@ def plot_sampler_performance_by_model(df: pd.DataFrame, out_dir: Path, *, min_co
             ax.axis("off")
             continue
 
-        order = [s for s in global_order if s in sub["sampler"].unique()]
-        sub["sampler_order"] = sub["sampler"].astype(pd.CategoricalDtype(categories=order, ordered=True))
+        order = [s for s in global_order if s in sub["sampler_category"].unique()]
+        sub["sampler_order"] = sub["sampler_category"].astype(pd.CategoricalDtype(categories=order, ordered=True))
 
         sns.boxplot(data=sub, x="sampler_order", y="value", order=order, showfliers=False, ax=ax)
         sns.stripplot(
@@ -508,7 +558,14 @@ def plot_sampler_performance_by_model(df: pd.DataFrame, out_dir: Path, *, min_co
             ax=ax,
         )
 
-        xlabels = [pretty_sampler(s) for s in order]
+        def pretty_category(cat: str) -> str:
+            if cat == "none":
+                return "None"
+            if cat == "class_weights":
+                return "Class Weights"
+            return pretty_sampler(cat)
+
+        xlabels = [pretty_category(s) for s in order]
         ax.set_xticks(range(len(order)))
         ax.set_xticklabels(xlabels, rotation=25, ha="right")
         ax.set_title(model)
@@ -570,8 +627,10 @@ def main() -> None:
     )
     mitigation_summary.to_csv(out_dir / "mitigation_summary_by_group_and_model.csv", index=False)
 
+    df_trials_cat = _add_sampler_category_column(df_trials)
+
     sampler_summary_global = (
-        df_trials.groupby("sampler")["value"]
+        df_trials_cat.groupby("sampler_category")["value"]
         .agg(trials="count", mean="mean", median="median", best="max", std="std")
         .reset_index()
         .sort_values("mean", ascending=False)
@@ -579,7 +638,7 @@ def main() -> None:
     sampler_summary_global.to_csv(out_dir / "sampler_summary_global.csv", index=False)
 
     sampler_summary_by_model = (
-        df_trials.groupby(["model_type", "sampler"])["value"]
+        df_trials_cat.groupby(["model_type", "sampler_category"])["value"]
         .agg(trials="count", mean="mean", median="median", best="max", std="std")
         .reset_index()
         .sort_values(["model_type", "mean"], ascending=[True, False])

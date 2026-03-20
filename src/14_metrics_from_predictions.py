@@ -125,7 +125,7 @@ for pred_path in pred_files:
 OUTPUT_METRICS.mkdir(parents=True, exist_ok=True)
 out_path = OUTPUT_METRICS / "all_models_metrics.csv"
 
-metrics_df = pd.DataFrame(rows)
+metrics_df = pd.DataFrame(rows).round(4)
 metrics_df = metrics_df.sort_values(["f1_macro"], ascending=False)
 metrics_df.to_csv(out_path, index=False)
 

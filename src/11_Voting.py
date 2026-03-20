@@ -52,7 +52,7 @@ DATE_COL = "order date (DateOrders)"
 RANDOM_STATE = 42
 
 # Voting configuration: set VOTING_MODE=hard or VOTING_MODE=soft.
-VOTING_MODE = os.environ.get("VOTING_MODE", "hard").strip().lower()
+VOTING_MODE = os.environ.get("VOTING_MODE", "soft").strip().lower()
 if VOTING_MODE not in {"hard", "soft"}:
 	raise ValueError("VOTING_MODE must be 'hard' or 'soft'.")
 

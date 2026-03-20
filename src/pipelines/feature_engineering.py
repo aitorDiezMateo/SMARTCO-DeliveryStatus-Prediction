@@ -138,6 +138,7 @@ class HistoricalTargetStats(BaseEstimator, TransformerMixin):
         self.smoothing = float(smoothing)
 
         self.classes_: Optional[np.ndarray] = np.array(list(classes)) if classes is not None else None
+        self.classes = classes
         self.global_priors_: Optional[np.ndarray] = None
         self._group_posteriors: dict[str, pd.DataFrame] = {}
         self._group_counts: dict[str, pd.Series] = {}

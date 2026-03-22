@@ -1,12 +1,20 @@
 """
-Verifica que XGBoost puede ejecutarse en GPU (CUDA).
+DIAGNOSTIC UTILITY - XGBOOST GPU (CUDA) VERIFICATION
 
-Comprobaciones:
-  1. Import y version de XGBoost
-  2. build_info(): compilado con USE_CUDA
-  3. Entrenamiento minimo en GPU con xgb.train()
-  4. GPU utiliza VRAM real (memory usage > 0 MiB antes/despues)
-  5. Benchmark: compara tiempo CPU vs GPU para confirmar aceleracion
+This script verifies XGBoost GPU acceleration is properly configured:
+1. Import and version of XGBoost
+2. build_info(): confirms XGBoost compiled with USE_CUDA flag
+3. Minimal GPU training with xgb.train() (functional test)
+4. GPU VRAM usage verification (confirms real GPU memory > 0 MiB)
+5. Performance benchmark: CPU vs GPU runtime comparison (qualitative acceleration check)
+
+Purpose: Validate CUDA environment before running 04_XGBoost.py GPU-accelerated tuning.
+Use when: Debugging GPU training failures or confirming GPU availability on HPC nodes.
+
+This is a DIAGNOSTIC TOOL (not part of model training pipeline).
+Run on compute nodes before launching Optuna GPU tuning jobs.
+
+Output: Diagnostic messages to stdout ([OK], [ERROR], [WARN] tags).
 """
 
 import sys
@@ -30,9 +38,7 @@ def _section(title: str) -> None:
 def main() -> int:
     overall_ok = True
 
-    # ------------------------------------------------------------------
-    # 1. Import
-    # ------------------------------------------------------------------
+    ######### 1. Import #########
     _section("1. Import XGBoost")
     try:
         import xgboost as xgb
@@ -42,9 +48,7 @@ def main() -> int:
         print(f"{ERR} No se pudo importar xgboost: {exc}")
         return 1
 
-    # ------------------------------------------------------------------
-    # 2. build_info
-    # ------------------------------------------------------------------
+    ######### 2. build_info #########
     _section("2. Build info (CUDA compilado?)")
     build_info: dict = {}
     try:
@@ -64,10 +68,8 @@ def main() -> int:
         print("     Instala: CONDA_OVERRIDE_CUDA=12.8 conda install -c conda-forge py-xgboost-gpu")
         overall_ok = False
 
-    # ------------------------------------------------------------------
-    # 3. Entrenamiento minimo en GPU
-    # ------------------------------------------------------------------
-    _section("3. Entrenamiento minimo en GPU")
+    ######### 3. Minimal GPU training #########
+    _section("3. Minimal GPU training")
     rng = np.random.default_rng(42)
     X_small = rng.standard_normal((200, 10)).astype(np.float32)
     y_small = rng.integers(0, 2, size=200).astype(np.float32)
@@ -89,9 +91,7 @@ def main() -> int:
         print(f"{ERR} Fallo al entrenar en GPU: {exc}")
         overall_ok = False
 
-    # ------------------------------------------------------------------
-    # 4. Benchmark CPU vs GPU
-    # ------------------------------------------------------------------
+    ######### 4. Benchmark CPU vs GPU #########
     _section("4. Benchmark CPU vs GPU")
     rng2 = np.random.default_rng(0)
     X_big = rng2.standard_normal((5_000, 50)).astype(np.float32)
@@ -120,10 +120,8 @@ def main() -> int:
     else:
         print(f"{WARN} Benchmark GPU omitido (entrenamiento GPU fallo antes)")
 
-    # ------------------------------------------------------------------
-    # Resumen final
-    # ------------------------------------------------------------------
-    _section("Resumen")
+    ######### Final summary #########
+    _section("Summary")
     if overall_ok:
         print(f"{OK} Todo correcto — XGBoost esta usando GPU (CUDA)")
         return 0

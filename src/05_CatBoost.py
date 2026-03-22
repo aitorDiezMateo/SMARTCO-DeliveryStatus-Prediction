@@ -1,6 +1,18 @@
 """
-This script runs Optuna hyperparameter tuning for CatBoost with time-aware
-cross-validation.
+MODEL TUNING - CATBOOST WITH OPTUNA
+
+This script tunes CatBoost hyperparameters using Optuna:
+- CV-safe feature engineering pipeline (FeatureBuilder, HistoricalTargetStats)
+- Time-aware cross-validation (TimeSeriesSplit) to prevent data leakage
+- Multiclass-aware sampling strategies (SMOTE, undersampling variants)
+- Logs best trial hyperparameters to SQLite database
+
+Inputs:  data/processed/train_raw.csv
+Outputs: - output/optuna/catboost_study.db (Optuna study storage)
+         - output/predictions/catboost_predictions.csv (best model on test)
+         - output/optuna/catboost_*.pkl (best model artifacts)
+
+Part of the ENSEMBLE PIPELINE: tuning outputs are used by 08_Voting.py.
 """
 from __future__ import annotations
 

@@ -1,11 +1,21 @@
 """
-This script runs Optuna hyperparameter tuning for:
-  - a BaggingClassifier (DecisionTree base estimator), and
-  - a RandomForestClassifier,
-using CV-safe feature engineering and time-aware cross-validation.
+MODEL TUNING - BAGGING & RANDOM FOREST WITH OPTUNA
 
-It loads `data/processed/train_raw.csv`, builds an imblearn Pipeline with fold-safe
-encoders, and tunes model hyperparameters using TimeSeriesSplit.
+This script tunes ensemble learners using Optuna:
+- BaggingClassifier (with DecisionTree base estimator)
+- RandomForestClassifier
+- CV-safe feature engineering pipeline (FeatureBuilder, HistoricalTargetStats)
+- Time-aware cross-validation (TimeSeriesSplit) to prevent data leakage
+- Multiclass-aware sampling strategies (SMOTE, undersampling variants)
+- Logs best trial hyperparameters to SQLite database
+
+Inputs:  data/processed/train_raw.csv
+Outputs: - output/optuna/bagging_study.db (Optuna study storage)
+         - output/predictions/bagging_predictions.csv
+         - output/predictions/randomforest_predictions.csv
+         - output/optuna/bagging_*.pkl (best model artifacts)
+
+Part of the ENSEMBLE PIPELINE: tuning outputs are used by 08_Voting.py.
 """
 
 import os

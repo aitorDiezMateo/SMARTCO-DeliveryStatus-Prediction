@@ -1,8 +1,17 @@
 """
-This script performs Exploratory Data Analysis (EDA) on the processed dataset.
-It focuses on visualizing the distributions of numerical and categorical
-features in the train and test sets after the initial preprocessing step
-performed in `01_prepare_data.py`.
+EXPLORATORY DATA ANALYSIS - STAGE 2
+
+This script performs comprehensive EDA on the cleaned dataset:
+- Generates automated profiling report with ydata-profiling
+- Visualizes distributions of numerical and categorical features
+- Compares train vs test set characteristics for drift detection
+
+Dependency: Requires data/processed/ outputs from 01_prepare_data.py
+Inputs:  data/processed/train_raw.csv, test_raw.csv
+Outputs: output/eda/03_ydata_profile_train.html (profiling report)
+
+This is an EXPLORATORY STAGE (not part of model training pipeline).
+Use for methodology documentation and data quality assessment.
 """
 
 import math

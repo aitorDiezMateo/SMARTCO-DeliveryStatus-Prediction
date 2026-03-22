@@ -1,6 +1,16 @@
 """
-This script performs Data Leakage analysis and executes the train-test split 
-to ensure a clean separation for model evaluation.
+DATA PREPARATION PIPELINE
+
+This script prepares the raw dataset for modeling:
+- Analyzes and removes data leakage (forward-looking temporal features)
+- Performs temporal target encoding (safe date-based aggregations)
+- Executes clean train-test split (80-20) ensuring no data leakage
+
+Inputs:  data/raw/DataCoSupplyChainDataset.csv
+Outputs: data/processed/train_raw.csv, test_raw.csv
+
+This is the FIRST STEP in the pipeline (required before all downstream scripts).
+outputs feed into 02_EDA.py, 04_XGBoost.py, 05_CatBoost.py, and training scripts.
 """
 import pandas as pd
 import os
@@ -34,36 +44,35 @@ n_duplicates = df.duplicated().sum()
 percent = 100 * n_duplicates / len(df)
 
 print(f"Duplicated rows: {n_duplicates} ({percent:.2f}%)")
-print()
 # There aren't any duplicated rows in the dataset.
 
 ######### Feature Engineering: Temporal Target Encoding #########
 print("Generating rolling target encoding features...")
-# Asegurarse de que son datetime para calcular fechas
+# Ensure datetime dtype before computing temporal features
 df['order date (DateOrders)'] = pd.to_datetime(df['order date (DateOrders)'])
 df['shipping date (DateOrders)'] = pd.to_datetime(df['shipping date (DateOrders)'])
 
-# Fecha de llegada (real)
+# Real arrival date
 df['Arrival Date Real'] = df['shipping date (DateOrders)'] + pd.to_timedelta(df['Days for shipping (real)'], unit='D')
 
-# Extraer el historial de llegadas y hacer dummies del target
+# Build arrival history and one-hot encode the target
 df_arrivals = df[['Arrival Date Real', 'Delivery Status']].dropna().sort_values('Arrival Date Real')
 dummies = pd.get_dummies(df_arrivals['Delivery Status'])
 df_arrivals = pd.concat([df_arrivals, dummies], axis=1)
 
-# Agrupar llegadas por dia
+# Group arrivals by day
 daily_arrivals = df_arrivals.groupby(df_arrivals['Arrival Date Real'].dt.floor('D')).sum(numeric_only=True)
 
-# Reindexar para cubrir todo el lapso de tiempo hasta la fecha maxima
+# Reindex to cover the full timeline up to the maximum order date
 full_date_range = pd.date_range(daily_arrivals.index.min(), df['order date (DateOrders)'].max().floor('D'))
 daily_arrivals = daily_arrivals.reindex(full_date_range).fillna(0)
 
-# Calcular porcentajes rolling sin data leakage
+# Compute rolling percentages without data leakage
 windows = [7, 14, 30]
 rolling_features = {}
 
 for w in windows:
-    # shift(1) es super importante: asegura que los conteos sean estrictamente anteriores al dia actual (evita fuga de datos del mismo dia futuro)
+    # shift(1) is critical: only prior days contribute to each timestamp.
     roll_sum = daily_arrivals.rolling(window=w, min_periods=1).sum().shift(1)
     total = roll_sum.sum(axis=1).replace(0, np.nan)
     pct = roll_sum.div(total, axis=0).fillna(0)
@@ -76,15 +85,15 @@ rolling_df = pd.DataFrame(rolling_features)
 
 rolling_df = rolling_df.fillna(0)  # In case there are any NaNs left (e.g., at the very beginning of the series)
 
-# Unir con el dataset principal truncando las fechas a nivel de dia
+# Merge back into the main dataset using day-level dates
 df['order_date_floor'] = df['order date (DateOrders)'].dt.floor('D')
 df = df.merge(rolling_df, left_on='order_date_floor', right_index=True, how='left')
 
-# Rellenar NaNs solo en las columnas de target encoding tras el merge
+# Fill NaNs only in target-encoding columns after the merge
 target_enc_cols = [col for col in df.columns if col.startswith('target_enc_')]
 df[target_enc_cols] = df[target_enc_cols].fillna(0)
 
-# Drop columnas temporales
+# Drop temporary columns
 df = df.drop(columns=['Arrival Date Real', 'order_date_floor'])
 print("Rolling target encoding features generated successfully.")
 print("Current shape with new features:", df.shape)
@@ -122,10 +131,10 @@ REDUNDANT_COLS = [
     "Product Status",          # constant, non-informative
 ]
 
-# Unimos todas las listas para el drop final
+# Combine all lists for the final drop
 ALL_COLS_TO_DROP = LEAKAGE_COLS + PII_AND_IDS_COLS + TEXT_AND_NOISE_COLS + REDUNDANT_COLS
 
-# Aplicamos la limpieza
+# Apply column cleanup
 df = df.drop(columns=ALL_COLS_TO_DROP)
 
 print("DF shape after dropping columns:", df.shape)

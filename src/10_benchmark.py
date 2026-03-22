@@ -1,14 +1,18 @@
 """
-Benchmark baseline models on the *raw* train/test data.
+BASELINE MODELS - BENCHMARK COMPARISON
 
-Models:
-- LogisticRegression
-- DummyClassifier
+This script trains simple baseline models on RAW (non-engineered) data:
+- LogisticRegression (statistical baseline)
+- DummyClassifier (random/stratified baseline)
 
-Requirements:
-- Print metrics to stdout (do not save reports).
-- Save predictions only to `output/predictions/`.
-- No sampling / oversampling / resampling.
+Purpose: Establish a performance floor to validate that complex models add value.
+
+Inputs:  data/processed/train_raw.csv, test_raw.csv (raw, no feature engineering)
+Outputs: output/predictions/logistic_regression_predictions.csv
+         output/predictions/dummy_predictions.csv
+         Metrics printed to stdout (no classification reports saved)
+
+Always keep baseline predictions for comparison in ensemble analysis.
 """
 
 from __future__ import annotations

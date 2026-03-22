@@ -1,12 +1,20 @@
 """
-Create (but do not train) the best-performing model objects from Optuna studies:
+MODEL TRAINING - STACKING CLASSIFIER ENSEMBLE
 
-- XGBoost (`src/07_XGBoost.py`)
-- CatBoost (`src/08_CatBoost.py`)
-- Bagging + RandomForest (`src/09_Bagging.py`)
+This script trains a StackingClassifier combining best models from Optuna:
+- MetaLearner: LogisticRegression (stack predictions from base models)
+- Base Estimators:
+  - Best XGBoost (from output/optuna/xgboost_study.db)
+  - Best CatBoost (from output/optuna/catboost_study.db)
+  - Best BaggingClassifier (from output/optuna/bagging_study.db)
+  - Best RandomForestClassifier (from output/optuna/bagging_study.db)
 
-This module loads the best hyperparameters from SQLite Optuna storages under
-`output/optuna/` and instantiates the corresponding estimators / pipelines.
+Inputs:  data/processed/train_raw.csv, test_raw.csv
+Outputs: - output/predictions/stacking_predictions.csv
+         - Metrics printed to stdout
+
+This is an EXPERIMENTAL ENSEMBLE SCRIPT (similar to 08_Voting.py).
+Not required for final submission; use to compare stacking vs voting strategies.
 """
 
 from __future__ import annotations

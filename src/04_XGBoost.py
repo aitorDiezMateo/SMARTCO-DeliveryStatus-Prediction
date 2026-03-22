@@ -1,9 +1,19 @@
 """
-This script runs Optuna hyperparameter tuning for GPU XGBoost with CV-safe
-feature engineering and time-aware cross-validation.
+MODEL TUNING - XGBOOST WITH OPTUNA (GPU-ACCELERATED)
 
-It loads `data/processed/train_raw.csv`, builds an imblearn Pipeline with
-fold-safe encoders, and tunes XGBoost hyperparameters using TimeSeriesSplit.
+This script tunes XGBoost hyperparameters using Optuna:
+- CV-safe feature engineering pipeline (FeatureBuilder, HistoricalTargetStats)
+- Time-aware cross-validation (TimeSeriesSplit) to prevent data leakage
+- GPU acceleration via XGBoost's tree_method='gpu_hist' (requires CUDA)
+- Multiclass-aware sampling strategies (SMOTE, undersampling variants)
+- Logs best trial hyperparameters to SQLite database
+
+Inputs:  data/processed/train_raw.csv
+Outputs: - output/optuna/xgboost_study.db (Optuna study storage)
+         - output/predictions/xgboost_predictions.csv (best model on test)
+         - output/optuna/xgboost_*.pkl (best model artifacts)
+
+Part of the ENSEMBLE PIPELINE: tuning outputs are used by 08_Voting.py.
 """
 
 from __future__ import annotations

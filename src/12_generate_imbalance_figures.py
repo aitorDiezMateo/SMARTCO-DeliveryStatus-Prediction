@@ -1,17 +1,21 @@
 """
-Generate publication-quality figures for imbalance analysis and mitigation.
+ANALYSIS & VISUALIZATION - CLASS IMBALANCE MITIGATION STRATEGIES
 
-This script:
-1) Plots the class distribution from `data/processed/train_raw.csv`.
-2) Loads Optuna trials from ONLY `output/optuna/**/*.db`.
-3) Creates comparison visualizations for imbalance mitigation:
-   - None vs mitigated (based on sampler choice + whether class weights are enabled)
-   - Objective distributions by mitigation group
-   - Cumulative best curves
-   - Usage counts
-   - NEW: Effectiveness of each `sampler` option:
-     - globally across all models/studies
-     - per model type (XGBoost / CatBoost / Bagging / RandomForest)
+This script generates publication-quality figures for class imbalance analysis:
+
+1. Class distribution comparison (train set original distribution)
+2. Optuna trial analysis across all studies in output/optuna/**/*.db:
+   - Effectiveness of each sampling strategy (none, random, SMOTE, SMOTEENN, etc.)
+   - Global comparison across all models
+   - Per-model-type breakdown (XGBoost vs CatBoost vs Bagging vs RandomForest)
+   - Cumulative best objective curves
+   - Sampler choice usage frequency
+
+Inputs:  data/processed/train_raw.csv, output/optuna/**/*.db
+Outputs: output/imbalance_figures/ (SVGs and comparison CSVs)
+         - mitigation_summary_by_group_and_model.csv
+         - sampler_summary_by_model.csv
+         - sampler_summary_global.csv
 """
 
 from __future__ import annotations

@@ -1,15 +1,18 @@
 """
-Train a VotingClassifier for Delivery Status prediction using the best Optuna hyperparameters from:
+EXPERIMENTAL MODEL - VOTING CLASSIFIER ENSEMBLE
 
-- XGBoost (`output/optuna/xgboost_study.db`, study `xgboost_study`)
-- CatBoost (`output/optuna/catboost_study.db`, study `catboost_v2`)
-- Bagging (`output/optuna/bagging_study.db`, study `bagging__bagging`)
+This script trains a VotingClassifier combining best models from Optuna:
+- XGBoost (from output/optuna/xgboost_study.db)
+- CatBoost (from output/optuna/catboost_study.db)
+- BaggingClassifier (from output/optuna/bagging_study.db)
+- Implements both hard voting (majority) and soft voting (probability averaging)
 
-The script trains on `data/processed/train_raw.csv`, evaluates on
-`data/processed/test_raw.csv`, prints metrics, and saves:
+Inputs:  data/processed/train_raw.csv, test_raw.csv
+Outputs: - output/predictions/voting_hard_predictions.csv
+         - output/predictions/voting_soft_predictions.csv
+         - Metrics printed to stdout
 
-- `data/processed/voting_classification_report.csv`
-- `data/processed/voting_predictions.csv`
+Use to compare ensemble strategies against individual best models.
 """
 
 from __future__ import annotations

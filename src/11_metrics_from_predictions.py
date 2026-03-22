@@ -1,15 +1,14 @@
 """
-Collect and compute metrics for all saved prediction CSVs.
+METRICS AGGREGATION - ALL MODELS
 
-Input:
-- `output/predictions/*.csv` (created by scripts like 10/11/12/13)
+This script aggregates evaluation metrics across all model predictions:
+- Loads all saved predictions from output/predictions/*.csv
+- Computes per-model metrics:  accuracy, balanced accuracy, F1, precision, recall
+- Computes probability-based metrics (if proba_* columns exist): ROC-AUC, PR-AUC (one-vs-rest)
+- Generates confusion matrices
 
-For each CSV:
-- compares `Delivery Status` (ground truth) vs `prediction` (predicted)
-- if `proba_*` columns exist, computes ROC-AUC and PR-AUC (one-vs-rest)
-
-Output:
-- `output/metrics/all_models_metrics.csv`
+Inputs:  output/predictions/*.csv (from 09_best_models_individual.py, 08_Voting.py, 10_benchmark.py)
+Outputs: output/metrics/all_models_metrics.csv (summary table for comparison)
 """
 
 from __future__ import annotations

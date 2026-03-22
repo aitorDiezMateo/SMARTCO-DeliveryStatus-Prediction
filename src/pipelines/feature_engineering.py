@@ -1,8 +1,26 @@
 """
-General, CV-safe feature engineering + preprocessing pipeline.
+PRODUCTION FEATURE ENGINEERING PIPELINE (CV-SAFE)
 
-- Deterministic feature engineering is always the same (FeatureBuilder).
-- Encoders / scalers / oversamplers / models are configurable.
+This module implements the ACTIVE feature engineering and preprocessing pipeline used by ALL training scripts.
+
+Core Components:
+- FeatureBuilder: Deterministic calendar features, cross-border flag, shipping route, frequency encoding
+- HistoricalTargetStats: Time-aware, CV-safe historical target probabilities per group (past-only)
+- TargetMeanEncoderMulticlass: Multiclass-aware target encoding for high-cardinality features
+- CategoricalResampler: Categorical-aware SMOTE/resampling for mixed-type data
+- LazyPreprocessor: Lazy ColumnTransformer (one-hot + target encoding)
+- build_pipeline(): Orchestrates full sklearn/imblearn pipeline with models and sampling
+
+Key Design:
+- ALL feature transformations are CV-safe (fit only on training, apply to test)
+- Time-aware: HistoricalTargetStats uses past-only cumulative statistics (no data leakage)
+- Configurable: Sampling, scaling, model, smoothing parameters can be customized
+- Sklearn-compatible: All classes inherit from BaseEstimator/TransformerMixin
+
+Used by: All training/tuning scripts (04_XGBoost.py, 05_CatBoost.py, 06_Bagging.py, etc.)
+         Via: fe_mod = _load_fe_module() in each script
+
+This is the PRODUCTION PIPELINE (required for all model training).
 """
 
 from __future__ import annotations

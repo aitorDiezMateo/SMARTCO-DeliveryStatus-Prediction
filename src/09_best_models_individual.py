@@ -1,15 +1,21 @@
 """
-Train the best Optuna models individually on the full training set and evaluate on the test set.
+MODEL EVALUATION - BEST INDIVIDUAL MODELS
 
-Models:
-- Best XGBoost (from Optuna study `xgboost_study`)
-- Best CatBoost (from Optuna study `catboost_v2`)
-- Best BaggingClassifier (from Optuna study `bagging__bagging`)
-- Best RandomForest (from Optuna study `bagging__rf`)
+This script trains the best Optuna models individually on full training data:
+- Best XGBoost (from output/optuna/xgboost_study.db)
+- Best CatBoost (from output/optuna/catboost_study.db)
+- Best BaggingClassifier (from output/optuna/bagging_study.db)
+- Best RandomForest (from output/optuna/bagging_study.db)
 
 For each model:
-- prints metrics to stdout
-- saves predictions only to `output/predictions/`
+- CV-safe feature engineering pipeline (applied in order: fit train → transform train/test)
+- Evaluates on test set with comprehensive metrics (accuracy, F1, precision, recall, confusion matrix)
+- Prints classification reports to stdout
+
+Inputs:  data/processed/train_raw.csv, test_raw.csv
+Outputs: output/predictions/{model_name}_predictions.csv
+
+Part of the FINAL EVALUATION PIPELINE: generates predictions for analysis.
 """
 
 from __future__ import annotations

@@ -1,7 +1,18 @@
 """
-This script performs Feature Engineering on the dataset.
-It creates, transforms, and prepares features to improve the predictive
-performance of machine learning models.
+EXPLORATORY FEATURE ENGINEERING ANALYSIS
+
+This script is NOT integrated into the final prediction pipeline. Instead, it serves
+as a documented exploration and visualization of feature engineering techniques,
+including:
+- Power transformations (Yeo-Johnson) with before/after KDE comparisons
+- Feature discretization/binning strategies
+- Handcrafted feature engineering decisions
+
+The ACTUAL production feature pipeline is in src/pipelines/feature_engineering.py,
+which is used by all training scripts (XGBoost, CatBoost, Bagging, Stacking, Voting).
+
+Use this script to understand the methodology and generate visualizations for reports.
+Outputs are saved to output/feature_engineering/ (SVGs and diagnostic CSVs).
 """
 
 import os
